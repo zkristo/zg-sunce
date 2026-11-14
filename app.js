@@ -9,7 +9,13 @@ const DEG = Math.PI / 180;
 const STEP = 5 * 60 * 1000; // slider / schedule resolution
 const EYE = 1.2; // m above ground where a terrace is tested for sun
 const CHUNK = 600; // m, buildings are split into square chunks so off-screen ones are skipped
-const COLORS = { building: 0xcfd2d6, ground: 0xe6e8ea, day: 0xe9edf2, night: 0x161b26, dusk: 0xf1dcc8, sunWarm: 0xffdcb8 };
+const COLORS = { tree: 0xb1c2ab, evergreen: 0x8fa692, building: 0xcfd2d6, ground: 0xe6e8ea, day: 0xe9edf2, night: 0x161b26, dusk: 0xf1dcc8, sunWarm: 0xffdcb8 };
+const SHADE = 0, TREE = 1, SUN = 2; // state of a terrace
+const STATE_NAME = ['shade', 'tree', 'sun'];
+const LEAF_ON = [415, 1031]; // deciduous trees carry leaves from 15 April to 31 October
+const TREE_CELL = 25; // m, lookup grid for the tree shade test
+const TREE_REACH = 250; // m, how far towards the sun a tree can still shade a terrace
+const TREE_MAX_DIST = 2000; // m, trees are not drawn when the camera is further away
 const TYPE_LABEL = { cafe: 'Kafić', bar: 'Bar', pub: 'Pub' };
 const HEMI_INTENSITY = 0.9;
 // Sun strength is raised as it gets lower so sunlit ground stays about equally bright all day.
@@ -19,6 +25,7 @@ const $ = (id) => document.getElementById(id);
 const fmtTime = new Intl.DateTimeFormat('hr-HR', { hour: '2-digit', minute: '2-digit', timeZone: 'Europe/Zagreb' });
 const fmtDay = new Intl.DateTimeFormat('en-CA', { timeZone: 'Europe/Zagreb' });
 const hhmm = (t) => fmtTime.format(t);
+const leafOn = (date) => { const d = fmtDay.format(date), md = d.slice(5, 7) * 100 + +d.slice(8); return md >= LEAF_ON[0] && md <= LEAF_ON[1]; };
 const smoothstep = (x, a, b) => { const t = Math.min(1, Math.max(0, (x - a) / (b - a))); return t * t * (3 - 2 * t); };
 
 // ?now=2026-06-21T10:00 shifts the clock (handy for testing and for sharing a moment).
@@ -42,6 +49,14 @@ const state = {
 
 let geo, terrain, cafes, bounds;
 let chunks, bvhTerrain; // chunks: [{ mesh, box, bvh }]
+let trees = null; // { n, x, y, z, rh, rv, evergreen, grid } — crowns are ellipsoids centred at (x, y, z)
+const treeGroup = new THREE.Group();
+const treeMats = {
+  leaf: new THREE.MeshLambertMaterial({ color: COLORS.tree, flatShading: true }),
+  bare: new THREE.MeshLambertMaterial({ color: COLORS.tree, flatShading: true, transparent: true, opacity: 0.22, depthWrite: false }),
+  evergreen: new THREE.MeshLambertMaterial({ color: COLORS.evergreen, flatShading: true }),
+};
+const deciduousMeshes = [];
 let needsRender = true;
 let tween = null;
 const schedules = new Map();
@@ -150,6 +165,56 @@ function buildTerrain(t) {
   return g;
 }
 
+const treeKey = (i, j) => (i + 4096) * 8192 + j + 4096;
+
+// Every tree is a low-poly ellipsoid crown; the same ellipsoids are used for the shade test.
+function buildTrees(data) {
+  const n = data.t.length / 3;
+  const t = { n, x: new Float32Array(n), y: new Float32Array(n), z: new Float32Array(n), rh: new Float32Array(n), rv: new Float32Array(n), evergreen: new Uint8Array(n), grid: new Map() };
+  const cells = new Map();
+  for (let k = 0; k < n; k++) {
+    const x = data.t[3 * k] / 10, y = data.t[3 * k + 1] / 10, code = data.t[3 * k + 2];
+    const h = data.h[code & 7], w = data.w[(code >> 3) & 3];
+    t.x[k] = x;
+    t.y[k] = y;
+    t.rh[k] = w / 2;
+    t.rv[k] = 0.3 * h;
+    t.z[k] = ground(x, y) + h - t.rv[k];
+    t.evergreen[k] = code >> 5;
+    const key = treeKey(Math.floor(x / TREE_CELL), Math.floor(y / TREE_CELL));
+    if (!t.grid.has(key)) t.grid.set(key, []);
+    t.grid.get(key).push(k);
+    const cell = Math.floor(x / CHUNK) + ',' + Math.floor(y / CHUNK) + ',' + t.evergreen[k];
+    if (!cells.has(cell)) cells.set(cell, []);
+    cells.get(cell).push(k);
+  }
+  const crown = new THREE.IcosahedronGeometry(1, 0);
+  const m = new THREE.Matrix4(), q = new THREE.Quaternion(), up = new THREE.Vector3(0, 1, 0);
+  for (const list of cells.values()) {
+    const evergreen = t.evergreen[list[0]];
+    const mesh = new THREE.InstancedMesh(crown, evergreen ? treeMats.evergreen : treeMats.leaf, list.length);
+    list.forEach((k, i) => {
+      q.setFromAxisAngle(up, k * 2.4); // turn each crown differently so they do not look stamped
+      mesh.setMatrixAt(i, m.compose(new THREE.Vector3(t.x[k], t.z[k], -t.y[k]), q, new THREE.Vector3(t.rh[k], t.rv[k], t.rh[k])));
+    });
+    mesh.computeBoundingSphere();
+    mesh.castShadow = mesh.receiveShadow = true;
+    if (!evergreen) deciduousMeshes.push(mesh);
+    treeGroup.add(mesh);
+  }
+  return t;
+}
+
+let leafShown = true;
+function showLeaves(leaf) {
+  if (leaf === leafShown) return;
+  leafShown = leaf;
+  for (const mesh of deciduousMeshes) {
+    mesh.material = leaf ? treeMats.leaf : treeMats.bare;
+    mesh.castShadow = leaf;
+  }
+}
+
 // ---------- markers ----------
 
 function dotTexture(fill, ring) {
@@ -179,7 +244,7 @@ function dotTexture(fill, ring) {
   return t;
 }
 const spriteMat = (fill, ring) => new THREE.SpriteMaterial({ map: dotTexture(fill, ring), sizeAttenuation: false, depthTest: false, transparent: true });
-const mats = { sun: spriteMat('#ffb800'), shade: spriteMat('#55606e'), ring: spriteMat('#1f2933', true), user: spriteMat('#2f7cf6') };
+const mats = { sun: spriteMat('#ffb800'), tree: spriteMat('#7fa076'), shade: spriteMat('#55606e'), ring: spriteMat('#1f2933', true), user: spriteMat('#2f7cf6') };
 const markers = new THREE.Group();
 markers.visible = false;
 const ringSprite = new THREE.Sprite(mats.ring);
@@ -193,9 +258,9 @@ scene.add(markers, ringSprite, userSprite);
 const pxScale = (px) => (px / innerHeight) * 2 * Math.tan((camera.fov * DEG) / 2);
 function styleMarkers() {
   for (const c of cafes) {
-    const px = (c.sunny ? 17 : 11) + (c.outdoor ? 3 : 0);
-    c.sprite.material = c.sunny ? mats.sun : mats.shade;
-    c.sprite.renderOrder = c.sunny ? 3 : 2;
+    const px = 11 + 3 * c.state + (c.outdoor ? 3 : 0);
+    c.sprite.material = mats[STATE_NAME[c.state]];
+    c.sprite.renderOrder = 1 + c.state;
     c.sprite.scale.setScalar(pxScale(px));
   }
   ringSprite.scale.setScalar(pxScale(34));
@@ -208,7 +273,7 @@ function sunAt(date) {
   const p = SunCalc.getPosition(date, geo.lat0, geo.lon0);
   const bearing = p.azimuth + Math.PI; // SunCalc: 0 = south, positive towards west
   const ch = Math.cos(p.altitude);
-  return { alt: p.altitude, dir: new THREE.Vector3(Math.sin(bearing) * ch, Math.sin(p.altitude), -Math.cos(bearing) * ch) };
+  return { alt: p.altitude, leaf: leafOn(date), dir: new THREE.Vector3(Math.sin(bearing) * ch, Math.sin(p.altitude), -Math.cos(bearing) * ch) };
 }
 
 const ray = new THREE.Ray();
@@ -219,6 +284,38 @@ function sunlit(cafe, s) {
   for (const c of chunks) if (ray.intersectsBox(c.box) && c.bvh.raycastFirst(ray, THREE.DoubleSide)) return false;
   return !bvhTerrain.raycastFirst(ray, THREE.DoubleSide);
 }
+
+// Does a tree crown stand between the terrace and the sun?
+const treeCells = new Set();
+function treeShaded(cafe, s) {
+  if (!trees) return false;
+  const t = trees, ox = cafe.x, oy = cafe.y, oz = cafe.z + EYE;
+  const dx = s.dir.x, dy = -s.dir.z, dz = s.dir.y, flat = Math.hypot(dx, dy) || 1e-9;
+  // Cells along the ground track of the ray, until it has climbed above the tallest tree.
+  const reach = Math.min(TREE_REACH, (30 * flat) / Math.max(dz, 1e-3));
+  treeCells.clear();
+  for (let d = 0; d <= reach + TREE_CELL; d += TREE_CELL) {
+    const i = Math.floor((ox + (dx / flat) * d) / TREE_CELL), j = Math.floor((oy + (dy / flat) * d) / TREE_CELL);
+    for (let a = -1; a <= 1; a++) for (let b = -1; b <= 1; b++) treeCells.add(treeKey(i + a, j + b));
+  }
+  for (const key of treeCells) {
+    const list = t.grid.get(key);
+    if (!list) continue;
+    for (const k of list) {
+      if (!s.leaf && !t.evergreen[k]) continue;
+      // Ray against the crown ellipsoid, in the space where the crown is a unit sphere.
+      const px = (ox - t.x[k]) / t.rh[k], py = (oy - t.y[k]) / t.rh[k], pz = (oz - t.z[k]) / t.rv[k];
+      const c = px * px + py * py + pz * pz - 1;
+      if (c <= 0) return true;
+      const ux = dx / t.rh[k], uy = dy / t.rh[k], uz = dz / t.rv[k];
+      const b = px * ux + py * uy + pz * uz;
+      if (b < 0 && b * b - (ux * ux + uy * uy + uz * uz) * c >= 0) return true;
+    }
+  }
+  return false;
+}
+
+const stateAt = (cafe, s) => (!sunlit(cafe, s) ? SHADE : treeShaded(cafe, s) ? TREE : SUN);
 
 // The day shown on the slider: today, or tomorrow once the sun has set.
 function computeDay(t) {
@@ -235,12 +332,12 @@ function computeDay(t) {
   };
 }
 
-// Sun / shade for one café at every slider step of the day (cached).
+// State of one café at every slider step of the day (cached).
 function schedule(cafe) {
   const key = cafe.id + state.day.key;
   if (!schedules.has(key)) {
     const s = new Array(state.day.n);
-    for (let i = 0; i < s.length; i++) s[i] = sunlit(cafe, sunAt(new Date(state.day.start + i * STEP)));
+    for (let i = 0; i < s.length; i++) s[i] = stateAt(cafe, sunAt(new Date(state.day.start + i * STEP)));
     schedules.set(key, s);
   }
   return schedules.get(key);
@@ -250,13 +347,13 @@ function forecast(cafe) {
   const s = schedule(cafe), d = state.day;
   const idx = Math.min(d.n - 1, Math.floor((state.time - d.start) / STEP));
   const at = (i) => (d.tomorrow && state.live ? 'sutra ' : '') + hhmm(d.start + i * STEP);
-  if (cafe.sunny) {
-    const end = s.indexOf(false, Math.max(0, idx + 1));
+  if (cafe.state === SUN) {
+    const end = s.findIndex((v, i) => i > idx && v !== SUN);
     return end < 0 ? `do zalaska (${hhmm(d.sunset)})` : `do ${at(end)}`;
   }
-  const next = s.indexOf(true, Math.max(0, idx + 1));
+  const next = s.indexOf(SUN, Math.max(0, idx + 1));
   if (next >= 0) return `sunce od ${at(next)}`;
-  return s.includes(true) ? 'danas više nema sunca' : 'nema sunca cijeli dan';
+  return s.includes(SUN) ? 'danas više nema sunca' : 'nema sunca cijeli dan';
 }
 
 function updateShadowFrustum() {
@@ -279,6 +376,7 @@ function applyTime() {
   const s = sunAt(state.time);
   state.alt = s.alt;
   if (s.alt > 0) state.sunDir.copy(s.dir);
+  showLeaves(s.leaf);
   const deg = s.alt / DEG;
   const day = smoothstep(deg, -5, 4);
   const warm = 1 - smoothstep(deg, 2, 16);
@@ -288,7 +386,7 @@ function applyTime() {
   scene.background.set(COLORS.night).lerp(new THREE.Color(COLORS.day).lerp(new THREE.Color(COLORS.dusk), warm * 0.6), day);
 
   if (state.ready) {
-    for (const c of cafes) c.sunny = sunlit(c, s);
+    for (const c of cafes) c.state = stateAt(c, s);
     styleMarkers();
   }
   updateUI();
@@ -325,7 +423,10 @@ function updateUI() {
 
   const count = $('count');
   count.hidden = !state.ready || night;
-  if (state.ready) count.textContent = `☀ ${cafes.filter((c) => c.sunny).length} od ${cafes.length} terasa na suncu`;
+  const under = state.ready ? cafes.filter((c) => c.state === TREE).length : 0;
+  if (state.ready) count.textContent = `☀ ${cafes.filter((c) => c.state === SUN).length} od ${cafes.length} terasa na suncu`;
+  $('under').hidden = !under || night;
+  $('under').textContent = `🌳 ${under} pod krošnjom`;
 
   const cloud = $('cloud'), cc = state.cloud;
   cloud.hidden = cc == null || !state.live || night;
@@ -357,20 +458,20 @@ function distanceLabel(c) {
 
 function cafePanel(c) {
   const s = schedule(c), d = state.day, n = s.length;
-  // Sunny stretches of the day as a hard-edged gradient.
+  // Stretches of sun and tree shade over the day as a hard-edged gradient.
   const stops = [];
-  for (let i = 0; i < n; i++) {
-    if (s[i] && !s[i - 1]) stops.push(`transparent ${(i / n) * 100}%, var(--sun) ${(i / n) * 100}%`);
-    if (s[i] && !s[i + 1]) stops.push(`var(--sun) ${((i + 1) / n) * 100}%, transparent ${((i + 1) / n) * 100}%`);
+  for (let i = 0, j; i < n; i = j) {
+    for (j = i; j < n && s[j] === s[i]; j++);
+    stops.push(`${['transparent', 'var(--tree)', 'var(--sun)'][s[i]]} ${(i / n) * 100}% ${(j / n) * 100}%`);
   }
   const pos = (state.time - d.start) / (n * STEP);
-  const bar = el('div', { class: 'daybar', style: stops.length ? `background-image:linear-gradient(90deg,${stops.join(',')})` : '' });
+  const bar = el('div', { class: 'daybar', style: `background-image:linear-gradient(90deg,${stops.join(',')})` });
   if (pos >= 0 && pos <= 1) bar.append(el('i', { style: `left:${pos * 100}%` }));
   const seating = c.outdoor ? ' · terasa potvrđena u OSM-u' : '';
   return [
     el('h2', {}, c.name || 'Kafić bez imena'),
     el('div', { class: 'sub' }, (TYPE_LABEL[c.type] || 'Kafić') + seating + ' · ' + distanceLabel(c)),
-    el('div', { class: 'status' }, el('span', { class: 'dot ' + (c.sunny ? 'sun' : 'shade') }), (c.sunny ? 'Na suncu ' : 'U sjeni · ') + forecast(c)),
+    el('div', { class: 'status' }, el('span', { class: 'dot ' + STATE_NAME[c.state] }), ['U sjeni · ', 'Pod krošnjom · ', 'Na suncu '][c.state] + forecast(c)),
     bar,
     el('div', { class: 'ticks' }, el('span', {}, hhmm(d.sunrise)), el('span', {}, d.tomorrow ? 'sunce sutra' : 'sunce danas'), el('span', {}, hhmm(d.sunset))),
     el('div', { class: 'links' },
@@ -381,17 +482,19 @@ function cafePanel(c) {
 
 function listPanel() {
   const ref = state.user || { x: controls.target.x, y: -controls.target.z };
-  const sunny = cafes.filter((c) => c.sunny).sort((a, b) => Math.hypot(a.x - ref.x, a.y - ref.y) - Math.hypot(b.x - ref.x, b.y - ref.y));
+  const nearest = (st) => cafes.filter((c) => c.state === st).sort((a, b) => Math.hypot(a.x - ref.x, a.y - ref.y) - Math.hypot(b.x - ref.x, b.y - ref.y));
+  const row = (c) => el('li', { onclick: () => select(c) },
+    el('span', { class: 'dot ' + STATE_NAME[c.state] }),
+    el('span', { class: 'name' }, c.name || 'Kafić bez imena'),
+    el('span', { class: 'meta' }, `${forecast(c)} · ${distanceLabel(c)}`));
+  const sunny = nearest(SUN), under = nearest(TREE);
   const out = [
     el('h2', {}, `Na suncu (${sunny.length})`),
     el('div', { class: 'sub' }, `${hhmm(state.time)} · poredano po udaljenosti od ${state.user ? 'tebe' : 'središta karte'}`),
   ];
   if (!sunny.length) out.push(el('p', {}, state.alt <= 0 ? 'Sunce je ispod obzora.' : 'Trenutno nijedna terasa nije na suncu.'));
-  out.push(el('ul', { class: 'cafelist' }, ...sunny.slice(0, 40).map((c) =>
-    el('li', { onclick: () => select(c) },
-      el('span', { class: 'dot sun' }),
-      el('span', { class: 'name' }, c.name || 'Kafić bez imena'),
-      el('span', { class: 'meta' }, `${forecast(c)} · ${distanceLabel(c)}`)))));
+  out.push(el('ul', { class: 'cafelist' }, ...sunny.slice(0, 40).map(row)));
+  if (under.length) out.push(el('h2', {}, `Pod krošnjom (${under.length})`), el('ul', { class: 'cafelist' }, ...under.slice(0, 15).map(row)));
   return out;
 }
 
@@ -481,6 +584,7 @@ function frame() {
   if (!needsRender) return;
   needsRender = false;
   updateShadowFrustum();
+  treeGroup.visible = camera.position.distanceTo(controls.target) < TREE_MAX_DIST;
   renderer.render(scene, camera);
   $('needle').style.transform = `rotate(${controls.getAzimuthalAngle()}rad)`;
 }
@@ -493,7 +597,7 @@ function pick(clientX, clientY) {
   for (const c of cafes) {
     v.copy(c.sprite.position).project(camera);
     if (v.z > 1) continue;
-    const d = Math.hypot(((v.x + 1) / 2) * innerWidth - clientX, ((1 - v.y) / 2) * innerHeight - clientY) - (c.sunny ? 4 : 0);
+    const d = Math.hypot(((v.x + 1) / 2) * innerWidth - clientX, ((1 - v.y) / 2) * innerHeight - clientY) - (c.state === SUN ? 4 : 0);
     if (d < bestD) { best = c; bestD = d; }
   }
   return best;
@@ -617,7 +721,8 @@ async function updateCloud() {
 
 async function main() {
   const load = (name) => fetch(`data/${name}.json`).then((r) => { if (!r.ok) throw new Error(name); return r.json(); });
-  [geo, terrain, cafes] = await Promise.all([load('buildings'), load('terrain'), load('cafes')]);
+  let treeData;
+  [geo, terrain, cafes, treeData] = await Promise.all([load('buildings'), load('terrain'), load('cafes'), load('trees').catch(() => null)]);
 
   bounds = { minX: Infinity, maxX: -Infinity, minY: Infinity, maxY: -Infinity };
   for (const p of geo.parts.slice(0, geo.core)) {
@@ -644,7 +749,11 @@ async function main() {
   scene.add(land);
   geo.parts = null;
 
+  if (treeData) trees = buildTrees(treeData);
+  scene.add(treeGroup);
+
   for (const c of cafes) {
+    c.state = SHADE;
     c.sprite = new THREE.Sprite(mats.shade);
     c.sprite.position.set(c.x, c.z + 2, -c.y);
     markers.add(c.sprite);

@@ -8,65 +8,13 @@ Usage:  python3 tools/build_cafes.py
 import json
 import math
 import os
-from collections import defaultdict
 
-from common import DATA, Terrain, fetch, to_local, to_lonlat, write_json
+from common import DATA, Index, Terrain, fetch, load_buildings, to_local, to_lonlat, write_json
 
 OVERPASS = "https://overpass-api.de/api/interpreter"
-CELL = 50  # m, spatial index cell
 KEEP_CLEARANCE = 1.0  # m: points at least this far from any wall are left where they are
 TERRACE_CLEARANCE = 2.5  # m: moved points end up this far from the nearest wall
 SEARCH_RADIUS = 30  # m
-
-
-def load_buildings():
-    with open(os.path.join(DATA, "buildings.json"), encoding="utf-8") as f:
-        b = json.load(f)
-    parts = []
-    for p in b["parts"]:
-        parts.append([[(r[i] / 10, r[i + 1] / 10) for i in range(0, len(r), 2)] for r in p[2:]])
-    return parts, b["core"]
-
-
-def seg_dist(px, py, a, b):
-    dx, dy = b[0] - a[0], b[1] - a[1]
-    t = ((px - a[0]) * dx + (py - a[1]) * dy) / ((dx * dx + dy * dy) or 1e-9)
-    t = min(1, max(0, t))
-    return math.hypot(px - a[0] - t * dx, py - a[1] - t * dy)
-
-
-def inside(px, py, rings):
-    """Even-odd test over all rings, so holes (courtyards) count as outside."""
-    c = False
-    for ring in rings:
-        for i in range(len(ring)):
-            (x1, y1), (x2, y2) = ring[i - 1], ring[i]
-            if (y1 > py) != (y2 > py) and px < x1 + (py - y1) * (x2 - x1) / (y2 - y1):
-                c = not c
-    return c
-
-
-class Index:
-    def __init__(self, parts):
-        self.parts = parts
-        self.grid = defaultdict(list)
-        for idx, rings in enumerate(parts):
-            xs, ys = [p[0] for p in rings[0]], [p[1] for p in rings[0]]
-            for i in range(int(min(xs) // CELL), int(max(xs) // CELL) + 1):
-                for j in range(int(min(ys) // CELL), int(max(ys) // CELL) + 1):
-                    self.grid[(i, j)].append(idx)
-
-    def nearest(self, x, y, reach=1):
-        """(signed clearance, part index): clearance is negative inside a building."""
-        ci, cj = int(x // CELL), int(y // CELL)
-        best, best_idx, is_inside = math.inf, None, False
-        for idx in {k for di in range(-reach, reach + 1) for dj in range(-reach, reach + 1) for k in self.grid.get((ci + di, cj + dj), ())}:
-            rings = self.parts[idx]
-            d = min(seg_dist(x, y, ring[i - 1], ring[i]) for ring in rings for i in range(len(ring)))
-            if d < best:
-                best, best_idx = d, idx
-            is_inside = is_inside or inside(x, y, rings)
-        return (-best if is_inside else best), best_idx
 
 
 def terrace_point(index, x, y):

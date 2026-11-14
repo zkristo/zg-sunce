@@ -5,6 +5,7 @@
   --muted: #66727f;
   --sun: #ffb800;
   --shade: #55606e;
+  --tree: #7fa076;
   --accent: #d97706;
   --radius: 14px;
   --shadow: 0 2px 12px rgba(20, 30, 45, 0.18);
@@ -167,12 +168,14 @@ html, body {
   cursor: pointer;
 }
 #panel h2 { margin: 0 0 2px; font-size: 18px; }
+#panel ul + h2 { margin-top: 16px; }
 #panel p { margin: 8px 0; }
 #panel a { color: var(--accent); }
 .small, .sub { font-size: 12.5px; color: var(--muted); }
 .status { display: flex; align-items: center; gap: 8px; margin: 10px 0 6px; font-weight: 600; }
 .dot { display: inline-block; width: 12px; height: 12px; border-radius: 50%; vertical-align: -1px; border: 2px solid #fff; box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.25); flex: none; }
 .dot.sun { background: var(--sun); }
+.dot.tree { background: var(--tree); }
 .dot.shade { background: var(--shade); }
 
 .daybar { position: relative; height: 14px; margin: 10px 0 2px; border-radius: 7px; background: var(--shade); }

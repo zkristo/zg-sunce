@@ -21,6 +21,7 @@ Nema build koraka: `index.html` + `app.js` + `style.css`, biblioteke (three.js, 
 | --- | --- | --- |
 | `data/buildings.json`, `data/terrain.json` | [ZG3D 2022, Grad Zagreb](https://data.zagreb.hr/dataset/?q=zg3d) (Otvorena dozvola) | `python3 tools/build_buildings.py` |
 | `data/cafes.json` | © [OpenStreetMap](https://www.openstreetmap.org/copyright) doprinositelji (ODbL), Overpass API | `python3 tools/build_cafes.py` |
+| `data/trees.json` | Katastar zelenila Grada Zagreba ([javni ArcGIS sloj](https://services8.arcgis.com/Usi0jGQwMmBUpFjr/arcgis/rest/services/stablo_SpatialJoin/FeatureServer), bez navedene licence) | `python3 tools/build_trees.py` |
 
 Alati koriste samo standardnu biblioteku Pythona, a preuzete datoteke spremaju u `tools/cache/`
 (obriši mapu za svježe podatke). Novi kvartovi dodaju se u popis `CORE` u `tools/build_buildings.py`.
@@ -28,5 +29,6 @@ Alati koriste samo standardnu biblioteku Pythona, a preuzete datoteke spremaju u
 ## Ograničenja modela
 
 - Zgrade su prizme od tla do najviše točke krova (`Z_Max`), pa su sjene kosih krovova malo predugačke.
-- Teren je gruba mreža izvedena iz podnožja zgrada; drveća, tendi i suncobrana nema.
+- Teren je gruba mreža izvedena iz podnožja zgrada; tendi i suncobrana nema.
+- Stabla su samo ona s javnih površina, većinom stanje iz 2016.; visina i širina krošnje poznate su samo kao razredi, pa je svako stablo elipsoid približne veličine. Listopadna stabla bacaju sjenu od 15. travnja do 31. listopada. Terasa koju zaklanja samo krošnja prikazuje se zasebno („pod krošnjom”).
 - OSM točka kafića obično je unutar zgrade, pa se pomiče na najbliži otvoreni prostor — to je procjena položaja terase.
