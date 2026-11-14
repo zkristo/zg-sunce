@@ -637,7 +637,7 @@ function bindUI() {
 // Two fingers: twisting turns the map, pinching zooms, sliding both fingers up or down tilts.
 // Phones report each finger in its own event, so the gesture is judged from the movement since
 // the fingers went down, and then locked (as in Google Maps) until a finger lifts.
-const GESTURE_START = 12; // px of movement before the gesture is decided
+const GESTURE_START = 6; // px each finger must move before the gesture is decided
 function bindTouch() {
   const pts = new Map();
   let start = null, prev = null, mode = null; // mode: 'tilt' | 'map'
@@ -663,13 +663,20 @@ function bindTouch() {
     const cur = read();
     if (!mode) {
       const [a, b] = [...pts.values()];
-      const da = cur.ay - start.ay, db = cur.by - start.by;
-      const side = Math.max(Math.abs(a.x - start.ax), Math.abs(b.x - start.bx));
-      const spread = Math.abs(cur.dist - start.dist);
-      const both = Math.min(Math.abs(da), Math.abs(db)) >= GESTURE_START / 2;
-      if (both && da * db > 0 && side < Math.min(Math.abs(da), Math.abs(db))) mode = 'tilt';
-      else if ((both && da * db < 0) || spread >= GESTURE_START || side >= GESTURE_START || Math.max(Math.abs(da), Math.abs(db)) >= 3 * GESTURE_START) mode = 'map';
-      else return;
+      const va = [a.x - start.ax, a.y - start.ay], vb = [b.x - start.bx, b.y - start.by];
+      const la = Math.hypot(...va), lb = Math.hypot(...vb);
+      // Pinching moves the fingers along the line between them; a finger running ahead of the
+      // other (common when tilting) moves across it.
+      const ux = (start.bx - start.ax) / start.dist, uy = (start.by - start.ay) / start.dist;
+      const pinch = Math.abs((vb[0] - va[0]) * ux + (vb[1] - va[1]) * uy);
+      const upDown = (v) => Math.abs(v[1]) > Math.abs(v[0]);
+      if (Math.min(la, lb) >= GESTURE_START) {
+        // Both fingers have moved: tilt if both went mostly up or both mostly down, without pinching.
+        const tilt = upDown(va) && upDown(vb) && va[1] * vb[1] > 0 && pinch < Math.max(Math.abs(va[1]), Math.abs(vb[1]));
+        mode = tilt ? 'tilt' : 'map';
+      } else if (pinch >= 3 * GESTURE_START || Math.max(la, lb) >= 16 * GESTURE_START) {
+        mode = 'map'; // a clear pinch, or turning around a finger that stays put
+      } else return;
       prev = start; // apply the movement made while deciding
     }
     const s = new THREE.Spherical().setFromVector3(camera.position.clone().sub(controls.target));
