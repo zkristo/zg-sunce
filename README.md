@@ -1,6 +1,6 @@
 # Sunčane terase
 
-3D karta središta Zagreba u stvarnom vremenu: koje su terase kafića trenutno na suncu, a koje u sjeni.
+3D karta Zagreba (središte, Trnje i Novi Zagreb) u stvarnom vremenu: koje su terase kafića trenutno na suncu, a koje u sjeni.
 
 - Sive zgrade + stvarne sjene za trenutni položaj sunca (osvježava se svake minute).
 - Klizač za ostatak dana, prognoza „na suncu do HH:MM” za svaki kafić.

@@ -8,6 +8,7 @@ import SunCalc from 'suncalc';
 const DEG = Math.PI / 180;
 const STEP = 5 * 60 * 1000; // slider / schedule resolution
 const EYE = 1.2; // m above ground where a terrace is tested for sun
+const CHUNK = 600; // m, buildings are split into square chunks so off-screen ones are skipped
 const COLORS = { building: 0xcfd2d6, ground: 0xe6e8ea, day: 0xe9edf2, night: 0x161b26, dusk: 0xf1dcc8, sunWarm: 0xffdcb8 };
 const TYPE_LABEL = { cafe: 'Kafić', bar: 'Bar', pub: 'Pub' };
 const HEMI_INTENSITY = 0.9;
@@ -40,7 +41,7 @@ const state = {
 };
 
 let geo, terrain, cafes, bounds;
-let bvhBuildings, bvhTerrain;
+let chunks, bvhTerrain; // chunks: [{ mesh, box, bvh }]
 let needsRender = true;
 let tween = null;
 const schedules = new Map();
@@ -62,16 +63,15 @@ const controls = new MapControls(camera, canvas);
 controls.enableDamping = true;
 controls.dampingFactor = 0.12;
 controls.minDistance = 80;
-controls.maxDistance = 7000;
+controls.maxDistance = 12000;
 controls.maxPolarAngle = 80 * DEG;
 controls.zoomToCursor = true;
+controls.touches.TWO = null; // two-finger gestures are handled in bindTouch
 
 const hemi = new THREE.HemisphereLight(0xffffff, 0xd0d3d8, HEMI_INTENSITY);
 const sun = new THREE.DirectionalLight(0xffffff, SUN_MAX);
 sun.castShadow = true;
 sun.shadow.mapSize.setScalar(coarse ? 2048 : 4096);
-sun.shadow.bias = -0.0004;
-sun.shadow.normalBias = 0.4;
 scene.add(hemi, sun, sun.target);
 
 const requestRender = () => { needsRender = true; };
@@ -216,7 +216,8 @@ function sunlit(cafe, s) {
   if (s.alt <= 0) return false;
   ray.origin.set(cafe.x, cafe.z + EYE, -cafe.y);
   ray.direction.copy(s.dir);
-  return !bvhBuildings.raycastFirst(ray, THREE.DoubleSide) && !bvhTerrain.raycastFirst(ray, THREE.DoubleSide);
+  for (const c of chunks) if (ray.intersectsBox(c.box) && c.bvh.raycastFirst(ray, THREE.DoubleSide)) return false;
+  return !bvhTerrain.raycastFirst(ray, THREE.DoubleSide);
 }
 
 // The day shown on the slider: today, or tomorrow once the sun has set.
@@ -260,15 +261,18 @@ function forecast(cafe) {
 
 function updateShadowFrustum() {
   const dist = camera.position.distanceTo(controls.target);
-  const size = Math.min(3500, Math.max(350, dist * 1.4));
+  const size = Math.min(6500, Math.max(350, dist * 1.4));
+  const depth = 1.5 * size + 400; // how far along the sun ray shadow casters can be from the pivot
   const cam = sun.shadow.camera;
   cam.left = cam.bottom = -size;
   cam.right = cam.top = size;
   cam.near = 100;
-  cam.far = 12000;
+  cam.far = 100 + 2 * depth;
   cam.updateProjectionMatrix();
+  // Back faces cast the shadows, so a small bias is enough; a large one leaks light along wall bases.
+  sun.shadow.bias = -(0.1 + size / sun.shadow.mapSize.x) / (2 * depth);
   sun.target.position.copy(controls.target);
-  sun.position.copy(controls.target).addScaledVector(state.sunDir, 6000);
+  sun.position.copy(controls.target).addScaledVector(state.sunDir, depth + 100);
 }
 
 function applyTime() {
@@ -418,24 +422,36 @@ function select(cafe) {
   state.selected = cafe;
   ringSprite.position.copy(cafe.sprite.position);
   ringSprite.visible = true;
-  flyTo(cafe.x, cafe.y, 450);
+  animateView({ x: cafe.x, y: cafe.y, maxDist: 450 });
   openPanel('cafe');
 }
 
 // ---------- camera ----------
 
-function flyTo(x, y, maxDist) {
-  const target = new THREE.Vector3(x, ground(x, y), -y);
-  const offset = camera.position.clone().sub(controls.target);
-  if (maxDist && offset.length() > maxDist) offset.setLength(maxDist);
-  tween = { t0: performance.now(), fromT: controls.target.clone(), fromP: camera.position.clone(), toT: target, toP: target.clone().add(offset) };
+const shortestTurn = (a) => Math.atan2(Math.sin(a), Math.cos(a));
+
+// Animate the camera: slide the pivot to (x, y), zoom in to maxDist and / or turn to the bearing theta.
+function animateView({ x, y, maxDist, theta }) {
+  const from = new THREE.Spherical().setFromVector3(camera.position.clone().sub(controls.target));
+  const to = from.clone();
+  if (maxDist) to.radius = Math.min(to.radius, maxDist);
+  if (theta != null) to.theta = from.theta + shortestTurn(theta - from.theta);
+  const fromT = controls.target.clone();
+  const toT = x == null ? fromT.clone() : new THREE.Vector3(x, ground(x, y), -y);
+  const travel = fromT.distanceTo(toT);
+  // Long slides rise a little on the way so the route stays visible.
+  const lift = Math.max(0, Math.min(travel * 0.5, 2500) - Math.max(from.radius, to.radius) * 0.5);
+  tween = { t0: performance.now(), ms: Math.min(1800, 500 + travel * 0.35), from, to, fromT, toT, lift };
 }
 
+const tweenS = new THREE.Spherical();
 function stepTween() {
   if (!tween) return;
-  const k = Math.min(1, (performance.now() - tween.t0) / 500), e = k * k * (3 - 2 * k);
+  const k = Math.min(1, (performance.now() - tween.t0) / tween.ms), e = k * k * (3 - 2 * k);
+  const { from, to } = tween;
   controls.target.lerpVectors(tween.fromT, tween.toT, e);
-  camera.position.lerpVectors(tween.fromP, tween.toP, e);
+  tweenS.set(from.radius + (to.radius - from.radius) * e + tween.lift * Math.sin(Math.PI * e), from.phi + (to.phi - from.phi) * e, from.theta + (to.theta - from.theta) * e);
+  camera.position.setFromSpherical(tweenS).add(controls.target);
   if (k === 1) tween = null;
   requestRender();
 }
@@ -505,36 +521,71 @@ function bindUI() {
   $('btn-list').addEventListener('click', () => openPanel(state.panel === 'list' ? null : 'list'));
   $('btn-info').addEventListener('click', () => openPanel(state.panel === 'info' ? null : 'info'));
   $('panel-close').addEventListener('click', () => openPanel(null));
-  $('btn-north').addEventListener('click', () => {
-    const offset = camera.position.clone().sub(controls.target);
-    const s = new THREE.Spherical().setFromVector3(offset);
-    s.theta = 0;
-    camera.position.copy(controls.target).add(offset.setFromSpherical(s));
-    requestRender();
-  });
+  $('btn-north').addEventListener('click', () => animateView({ theta: 0 }));
   $('btn-locate').addEventListener('click', locate);
 
+  bindTouch();
   controls.addEventListener('change', () => { constrainView(); requestRender(); });
   addEventListener('resize', resize);
   document.addEventListener('visibilitychange', () => { if (!document.hidden) tick(); });
 }
 
+// Two fingers: twisting turns the map, pinching zooms, dragging both fingers up or down tilts.
+function bindTouch() {
+  const pts = new Map();
+  let prev = null;
+  const read = () => {
+    const [a, b] = [...pts.values()];
+    return { ay: a.y, by: b.y, angle: Math.atan2(b.y - a.y, b.x - a.x), dist: Math.hypot(b.x - a.x, b.y - a.y) };
+  };
+  const release = (e) => { pts.delete(e.pointerId); prev = null; };
+  canvas.addEventListener('pointerdown', (e) => {
+    if (e.pointerType !== 'touch') return;
+    pts.set(e.pointerId, { x: e.clientX, y: e.clientY });
+    prev = pts.size === 2 ? read() : null;
+  });
+  canvas.addEventListener('pointerup', release);
+  canvas.addEventListener('pointercancel', release);
+  canvas.addEventListener('pointermove', (e) => {
+    const p = pts.get(e.pointerId);
+    if (!p) return;
+    p.x = e.clientX;
+    p.y = e.clientY;
+    if (pts.size !== 2 || !prev) return;
+    const cur = read();
+    const s = new THREE.Spherical().setFromVector3(camera.position.clone().sub(controls.target));
+    s.theta += shortestTurn(cur.angle - prev.angle);
+    s.radius = Math.min(controls.maxDistance, Math.max(controls.minDistance, (s.radius * prev.dist) / Math.max(cur.dist, 1)));
+    const da = cur.ay - prev.ay, db = cur.by - prev.by;
+    if (da * db > 0) s.phi -= Math.sign(da) * Math.min(Math.abs(da), Math.abs(db)) * 0.006;
+    s.phi = Math.min(controls.maxPolarAngle, Math.max(0.01, s.phi));
+    camera.position.setFromSpherical(s).add(controls.target);
+    prev = cur;
+    requestRender();
+  });
+}
+
+function showUser(x, y) {
+  state.user = { x, y };
+  const inside = x >= bounds.minX && x <= bounds.maxX && y >= bounds.minY && y <= bounds.maxY;
+  userSprite.visible = inside;
+  if (inside) {
+    userSprite.position.set(x, ground(x, y) + 2, -y);
+    animateView({ x, y, maxDist: 700 });
+  }
+  return inside;
+}
+
 function locate() {
   if (!navigator.geolocation) return toast('Preglednik ne podržava lokaciju.');
   $('btn-locate').classList.add('active');
+  if (state.user) showUser(state.user.x, state.user.y); // start sliding at once, the fresh fix follows
   navigator.geolocation.getCurrentPosition((p) => {
     $('btn-locate').classList.remove('active');
     const lat0 = geo.lat0 * DEG;
     const x = (p.coords.longitude - geo.lon0) * (111412.84 * Math.cos(lat0) - 93.5 * Math.cos(3 * lat0));
     const y = (p.coords.latitude - geo.lat0) * (111132.92 - 559.82 * Math.cos(2 * lat0) + 1.175 * Math.cos(4 * lat0));
-    state.user = { x, y };
-    if (x < bounds.minX || x > bounds.maxX || y < bounds.minY || y > bounds.maxY) {
-      toast('Izvan si prikazanog područja – udaljenosti se ipak računaju od tebe.');
-    } else {
-      userSprite.position.set(x, ground(x, y) + 2, -y);
-      userSprite.visible = true;
-      flyTo(x, y, 700);
-    }
+    if (!showUser(x, y)) toast('Izvan si prikazanog područja – udaljenosti se ipak računaju od tebe.');
     openPanel('list');
   }, () => {
     $('btn-locate').classList.remove('active');
@@ -574,11 +625,23 @@ async function main() {
     bounds.minY = Math.min(bounds.minY, p[2][1] / 10); bounds.maxY = Math.max(bounds.maxY, p[2][1] / 10);
   }
 
-  const buildings = new THREE.Mesh(buildBuildings(geo.parts), new THREE.MeshLambertMaterial({ color: COLORS.building, flatShading: true }));
-  buildings.castShadow = buildings.receiveShadow = true;
+  const cells = new Map();
+  for (const p of geo.parts) {
+    const key = Math.floor(p[2][0] / 10 / CHUNK) + ',' + Math.floor(p[2][1] / 10 / CHUNK);
+    if (!cells.has(key)) cells.set(key, []);
+    cells.get(key).push(p);
+  }
+  const material = new THREE.MeshLambertMaterial({ color: COLORS.building, flatShading: true });
+  chunks = [...cells.values()].map((parts) => {
+    const mesh = new THREE.Mesh(buildBuildings(parts), material);
+    mesh.castShadow = mesh.receiveShadow = true;
+    mesh.geometry.computeBoundingBox();
+    scene.add(mesh);
+    return { mesh, box: mesh.geometry.boundingBox };
+  });
   const land = new THREE.Mesh(buildTerrain(terrain), new THREE.MeshLambertMaterial({ color: COLORS.ground }));
   land.receiveShadow = true;
-  scene.add(land, buildings);
+  scene.add(land);
   geo.parts = null;
 
   for (const c of cafes) {
@@ -597,7 +660,7 @@ async function main() {
 
   // The BVH takes a moment to build; the map is already usable meanwhile.
   await new Promise((r) => setTimeout(r, 30));
-  bvhBuildings = new MeshBVH(buildings.geometry);
+  for (const c of chunks) c.bvh = new MeshBVH(c.mesh.geometry);
   bvhTerrain = new MeshBVH(land.geometry);
   state.ready = true;
   markers.visible = true;

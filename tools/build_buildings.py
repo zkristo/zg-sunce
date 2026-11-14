@@ -12,12 +12,21 @@ from common import LAT0, LON0, Terrain, fetch, to_local, write_json
 
 CKAN = "https://data.zagreb.hr/api/3/action/package_show?id="
 # Districts shown in the app.
-CORE = ["zg3d-gradska-cetvrt-donji-grad-2022", "zg3d-gradska-cetvrt-gornji-grad-2022"]
+CORE = [
+    "zg3d-gradska-cetvrt-donji-grad-2022",
+    "zg3d-gradska-cetvrt-gornji-grad-2022",
+    "zg3d-gradska-cetvrt-trnje-2022",
+    "zg3d-gradska-cetvrt-novi-zagreb-istok-2022",
+    "zg3d-gradska-cetvrt-novi-zagreb-zapad-2022",
+]
+# Novi Zagreb districts reach far into the villages around the city; core parts west or south
+# of these limits (local metres) are treated like neighbours.
+CORE_MIN_X, CORE_MIN_Y = -5000, -8000
 # Neighbouring districts: only parts within BUFFER m of the core are kept (shadow casters).
 NEIGHBOURS = [
     "zg3d-gradska-cetvrt-crnomerec-2022",
     "zg3d-gradska-cetvrt-tresnjevka-sjever-2022",
-    "zg3d-gradska-cetvrt-trnje-2022",
+    "zg3d-gradska-cetvrt-tresnjevka-jug-2022",
     "zg3d-gradska-cetvrt-pescenica-zitnjak-2022",
     "zg3d-gradska-cetvrt-maksimir-2022",
     "zg3d-gradska-cetvrt-podsljeme-2022",
@@ -125,6 +134,7 @@ def build_terrain(parts):
                 h[j * nx + i] = near[len(near) // 4]
 
     # Fill cells without buildings from their neighbours, then smooth.
+    empty = [v is None for v in h]
     while any(v is None for v in h):
         nxt = h[:]
         for j in range(ny):
@@ -138,10 +148,13 @@ def build_terrain(parts):
                     if vals:
                         nxt[j * nx + i] = sum(vals) / len(vals)
         h = nxt
-    for _ in range(2):
+    # Filled cells get many more passes: the fill leaves ridges that show up under a low sun.
+    for step in range(40):
         nxt = h[:]
         for j in range(ny):
             for i in range(nx):
+                if step >= 2 and not empty[j * nx + i]:
+                    continue
                 vals = [
                     h[jj * nx + ii]
                     for ii in (i - 1, i, i + 1)
@@ -155,18 +168,23 @@ def build_terrain(parts):
 
 def main():
     print("Loading core districts")
-    core = [p for slug in CORE for p in parts_of(load_district(slug))]
+    core, candidates = [], []
+    for slug in CORE:
+        for part in parts_of(load_district(slug)):
+            cx, cy = centroid(part[0][0])
+            (core if cx >= CORE_MIN_X and cy >= CORE_MIN_Y else candidates).append(part)
     cells = {(int(x // 100), int(y // 100)) for rings, _, _ in core for x, y in rings[0]}
     reach = BUFFER // 100
     near_cells = {(i + di, j + dj) for i, j in cells for di in range(-reach, reach + 1) for dj in range(-reach, reach + 1)}
 
     print("Loading neighbouring districts")
-    ring_parts = []
     for slug in NEIGHBOURS:
-        for part in parts_of(load_district(slug)):
-            cx, cy = centroid(part[0][0])
-            if (int(cx // 100), int(cy // 100)) in near_cells:
-                ring_parts.append(part)
+        candidates.extend(parts_of(load_district(slug)))
+    ring_parts = []
+    for part in candidates:
+        cx, cy = centroid(part[0][0])
+        if (int(cx // 100), int(cy // 100)) in near_cells:
+            ring_parts.append(part)
     parts = core + ring_parts
     print(f"  {len(core)} core parts + {len(ring_parts)} buffer parts")
 
