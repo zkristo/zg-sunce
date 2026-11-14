@@ -1,0 +1,207 @@
+:root {
+  --bg: #e9edf2;
+  --card: rgba(255, 255, 255, 0.92);
+  --text: #1f2933;
+  --muted: #66727f;
+  --sun: #ffb800;
+  --shade: #55606e;
+  --accent: #d97706;
+  --radius: 14px;
+  --shadow: 0 2px 12px rgba(20, 30, 45, 0.18);
+  --gap: 10px;
+  --safe-b: env(safe-area-inset-bottom, 0px);
+  --safe-t: env(safe-area-inset-top, 0px);
+}
+
+* { box-sizing: border-box; }
+
+html, body {
+  margin: 0;
+  height: 100%;
+  overflow: hidden;
+  background: var(--bg);
+  color: var(--text);
+  font: 15px/1.4 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  overscroll-behavior: none;
+}
+
+#scene {
+  position: fixed;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  display: block;
+  touch-action: none;
+  outline: none;
+}
+
+/* Top bar */
+#top {
+  position: fixed;
+  top: calc(var(--gap) + var(--safe-t));
+  left: var(--gap);
+  right: 62px;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  pointer-events: none;
+}
+#top h1 {
+  margin: 0;
+  padding: 7px 12px;
+  font-size: 16px;
+  font-weight: 700;
+  background: var(--card);
+  border-radius: 999px;
+  box-shadow: var(--shadow);
+}
+.chip {
+  padding: 6px 11px;
+  font-size: 13px;
+  background: var(--card);
+  border-radius: 999px;
+  box-shadow: var(--shadow);
+  white-space: nowrap;
+}
+.chip.warn { background: #fff4d6; }
+
+#banner {
+  position: fixed;
+  top: calc(var(--gap) + var(--safe-t) + 84px);
+  left: var(--gap);
+  right: 62px;
+  padding: 9px 14px;
+  background: rgba(22, 27, 38, 0.9);
+  color: #fff;
+  border-radius: var(--radius);
+  font-size: 14px;
+  text-align: center;
+  pointer-events: none;
+}
+
+/* Tool buttons */
+#tools {
+  position: fixed;
+  top: calc(var(--gap) + var(--safe-t));
+  right: var(--gap);
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+#tools button {
+  width: 44px;
+  height: 44px;
+  display: grid;
+  place-items: center;
+  border: 0;
+  border-radius: 50%;
+  background: var(--card);
+  color: var(--text);
+  box-shadow: var(--shadow);
+  cursor: pointer;
+}
+#tools button.active { background: var(--text); color: #fff; }
+#tools button:focus-visible, #btn-now:focus-visible, #panel-close:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+/* Time bar */
+#timebar {
+  position: fixed;
+  left: var(--gap);
+  right: var(--gap);
+  bottom: calc(var(--gap) + var(--safe-b));
+  padding: 10px 14px 8px;
+  background: var(--card);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow);
+  backdrop-filter: blur(6px);
+}
+.timerow { display: flex; align-items: baseline; gap: 8px; min-height: 30px; }
+#clock { font-size: 22px; font-weight: 700; font-variant-numeric: tabular-nums; }
+#mode { font-size: 12px; padding: 1px 7px; border-radius: 999px; background: #e3e7ec; color: var(--muted); }
+#mode.live { background: #dcfce7; color: #166534; }
+#sunline { flex: 1; font-size: 13px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+#btn-now {
+  align-self: center;
+  border: 0;
+  border-radius: 999px;
+  padding: 6px 14px;
+  background: var(--text);
+  color: #fff;
+  font: inherit;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+}
+#slider { width: 100%; height: 30px; margin: 2px 0 0; accent-color: var(--accent); cursor: pointer; }
+.ticks { display: flex; justify-content: space-between; font-size: 11px; color: var(--muted); font-variant-numeric: tabular-nums; }
+
+/* Panel: bottom sheet on phones, side card on wide screens */
+#panel {
+  position: fixed;
+  left: var(--gap);
+  right: var(--gap);
+  bottom: calc(var(--gap) + var(--safe-b) + 108px);
+  max-height: 42vh;
+  overflow-y: auto;
+  padding: 14px 16px;
+  background: var(--card);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow);
+  backdrop-filter: blur(6px);
+  -webkit-overflow-scrolling: touch;
+}
+#panel[hidden], #loading[hidden], #banner[hidden], .chip[hidden], #btn-now[hidden] { display: none; }
+#panel-close {
+  position: sticky;
+  top: 0;
+  float: right;
+  width: 32px;
+  height: 32px;
+  margin: -6px -8px 0 8px;
+  border: 0;
+  border-radius: 50%;
+  background: #e3e7ec;
+  font-size: 20px;
+  line-height: 1;
+  cursor: pointer;
+}
+#panel h2 { margin: 0 0 2px; font-size: 18px; }
+#panel p { margin: 8px 0; }
+#panel a { color: var(--accent); }
+.small, .sub { font-size: 12.5px; color: var(--muted); }
+.status { display: flex; align-items: center; gap: 8px; margin: 10px 0 6px; font-weight: 600; }
+.dot { display: inline-block; width: 12px; height: 12px; border-radius: 50%; vertical-align: -1px; border: 2px solid #fff; box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.25); flex: none; }
+.dot.sun { background: var(--sun); }
+.dot.shade { background: var(--shade); }
+
+.daybar { position: relative; height: 14px; margin: 10px 0 2px; border-radius: 7px; background: var(--shade); }
+.daybar i { position: absolute; top: -3px; width: 2px; height: 20px; background: var(--text); border-radius: 1px; }
+.links { display: flex; gap: 14px; margin-top: 10px; font-size: 13px; }
+
+.cafelist { list-style: none; margin: 8px 0 0; padding: 0; }
+.cafelist li { display: flex; align-items: center; gap: 10px; padding: 9px 2px; border-top: 1px solid #e3e7ec; cursor: pointer; }
+.cafelist li:hover { background: rgba(0, 0, 0, 0.03); }
+.cafelist .name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.cafelist .meta { font-size: 12.5px; color: var(--muted); white-space: nowrap; font-variant-numeric: tabular-nums; }
+
+#loading {
+  position: fixed;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  background: var(--bg);
+  font-size: 16px;
+  color: var(--muted);
+}
+
+@media (min-width: 800px) {
+  #top h1 { font-size: 18px; }
+  #banner { left: 50%; right: auto; width: max-content; max-width: 560px; transform: translateX(-50%); }
+  #timebar { left: 50%; right: auto; width: 620px; transform: translateX(-50%); }
+  #panel { left: auto; right: var(--gap); top: 220px; bottom: auto; width: 340px; max-height: calc(100vh - 240px); }
+}
+
+@media (max-height: 520px) {
+  #panel { max-height: 36vh; }
+}
