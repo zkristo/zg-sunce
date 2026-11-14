@@ -634,19 +634,23 @@ function bindUI() {
   document.addEventListener('visibilitychange', () => { if (!document.hidden) tick(); });
 }
 
-// Two fingers: twisting turns the map, pinching zooms, dragging both fingers up or down tilts.
+// Two fingers: twisting turns the map, pinching zooms, sliding both fingers up or down tilts.
+// Phones report each finger in its own event, so the gesture is judged from the movement since
+// the fingers went down, and then locked (as in Google Maps) until a finger lifts.
+const GESTURE_START = 12; // px of movement before the gesture is decided
 function bindTouch() {
   const pts = new Map();
-  let prev = null;
+  let start = null, prev = null, mode = null; // mode: 'tilt' | 'map'
   const read = () => {
     const [a, b] = [...pts.values()];
-    return { ay: a.y, by: b.y, angle: Math.atan2(b.y - a.y, b.x - a.x), dist: Math.hypot(b.x - a.x, b.y - a.y) };
+    return { ax: a.x, bx: b.x, ay: a.y, by: b.y, mid: (a.y + b.y) / 2, angle: Math.atan2(b.y - a.y, b.x - a.x), dist: Math.hypot(b.x - a.x, b.y - a.y) };
   };
-  const release = (e) => { pts.delete(e.pointerId); prev = null; };
+  const reset = () => { start = prev = pts.size === 2 ? read() : null; mode = null; };
+  const release = (e) => { if (pts.delete(e.pointerId)) reset(); };
   canvas.addEventListener('pointerdown', (e) => {
     if (e.pointerType !== 'touch') return;
     pts.set(e.pointerId, { x: e.clientX, y: e.clientY });
-    prev = pts.size === 2 ? read() : null;
+    reset();
   });
   canvas.addEventListener('pointerup', release);
   canvas.addEventListener('pointercancel', release);
@@ -655,14 +659,26 @@ function bindTouch() {
     if (!p) return;
     p.x = e.clientX;
     p.y = e.clientY;
-    if (pts.size !== 2 || !prev) return;
+    if (pts.size !== 2 || !start) return;
     const cur = read();
+    if (!mode) {
+      const [a, b] = [...pts.values()];
+      const da = cur.ay - start.ay, db = cur.by - start.by;
+      const side = Math.max(Math.abs(a.x - start.ax), Math.abs(b.x - start.bx));
+      const spread = Math.abs(cur.dist - start.dist);
+      const both = Math.min(Math.abs(da), Math.abs(db)) >= GESTURE_START / 2;
+      if (both && da * db > 0 && side < Math.min(Math.abs(da), Math.abs(db))) mode = 'tilt';
+      else if ((both && da * db < 0) || spread >= GESTURE_START || side >= GESTURE_START || Math.max(Math.abs(da), Math.abs(db)) >= 3 * GESTURE_START) mode = 'map';
+      else return;
+      prev = start; // apply the movement made while deciding
+    }
     const s = new THREE.Spherical().setFromVector3(camera.position.clone().sub(controls.target));
-    s.theta += shortestTurn(cur.angle - prev.angle);
-    s.radius = Math.min(controls.maxDistance, Math.max(controls.minDistance, (s.radius * prev.dist) / Math.max(cur.dist, 1)));
-    const da = cur.ay - prev.ay, db = cur.by - prev.by;
-    if (da * db > 0) s.phi -= Math.sign(da) * Math.min(Math.abs(da), Math.abs(db)) * 0.006;
-    s.phi = Math.min(controls.maxPolarAngle, Math.max(0.01, s.phi));
+    if (mode === 'tilt') {
+      s.phi = Math.min(controls.maxPolarAngle, Math.max(0.01, s.phi - (cur.mid - prev.mid) * 0.006));
+    } else {
+      s.theta += shortestTurn(cur.angle - prev.angle);
+      s.radius = Math.min(controls.maxDistance, Math.max(controls.minDistance, (s.radius * prev.dist) / Math.max(cur.dist, 1)));
+    }
     camera.position.setFromSpherical(s).add(controls.target);
     prev = cur;
     requestRender();
