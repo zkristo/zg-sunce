@@ -583,13 +583,9 @@ function el(tag, attrs = {}, ...children) {
 function updateUI() {
   const d = state.day, night = state.alt <= 0;
   $('clock').textContent = hhmm(state.time);
-  $('mode').textContent = state.live ? 'uživo' : d.tomorrow ? 'sutra' : 'danas';
-  $('mode').classList.toggle('live', state.live);
-  $('btn-now').hidden = state.live;
-  $('sunline').textContent = night ? 'sunce je ispod obzora' : `sunce ${Math.round(state.alt / DEG)}° nad obzorom`;
-  $('t-rise').textContent = '↑ ' + hhmm(d.sunrise);
-  $('t-set').textContent = hhmm(d.sunset) + ' ↓';
-  $('t-day').textContent = d.tomorrow ? 'sutra' : 'danas';
+  $('clock').classList.toggle('past', !state.live && !timeTween);
+  $('t-rise').textContent = hhmm(d.sunrise);
+  $('t-set').textContent = hhmm(d.sunset);
   const slider = $('slider');
   slider.max = d.n - 1;
   slider.value = Math.min(d.n - 1, Math.max(0, Math.round((state.time - d.start) / STEP)));
@@ -750,8 +746,45 @@ function resize() {
   requestRender();
 }
 
+// Tapping the time slides the slider back to now; shadows and markers follow as if it were dragged.
+let timeTween = null;
+function backToNow() {
+  if (state.live || timeTween) return;
+  const from = +state.time, gap = Math.abs(+now() - from) / (state.day.n * STEP);
+  timeTween = { t0: performance.now(), from, ms: Math.min(1400, 450 + 900 * gap) };
+}
+
+function stepTimeTween() {
+  if (!timeTween) return;
+  const k = Math.min(1, (performance.now() - timeTween.t0) / timeTween.ms), e = k * k * (3 - 2 * k);
+  if (k === 1) {
+    timeTween = null;
+    state.live = true;
+    tick(true);
+    return;
+  }
+  state.time = new Date(timeTween.from + (+now() - timeTween.from) * e);
+  applyTime();
+}
+
+// The buttons and the bottom sheet stack above the time bar, whatever their heights.
+function trackLayout() {
+  const root = document.documentElement, bar = $('timebar'), panel = $('panel');
+  const wide = matchMedia('(min-width: 800px)');
+  const update = () => {
+    const gap = parseFloat(getComputedStyle(root).getPropertyValue('--gap'));
+    root.style.setProperty('--bar', bar.offsetHeight + 'px');
+    root.style.setProperty('--sheet', panel.hidden || wide.matches ? '0px' : panel.offsetHeight + gap + 'px');
+  };
+  new ResizeObserver(update).observe(bar);
+  new ResizeObserver(update).observe(panel);
+  addEventListener('resize', update);
+  update();
+}
+
 function frame() {
   requestAnimationFrame(frame);
+  stepTimeTween();
   stepTween();
   controls.update();
   if (!needsRender) return;
@@ -792,11 +825,12 @@ function bindUI() {
   });
 
   $('slider').addEventListener('input', (e) => {
+    timeTween = null;
     state.live = false;
     state.time = new Date(state.day.start + e.target.value * STEP);
     applyTime();
   });
-  $('btn-now').addEventListener('click', () => { state.live = true; tick(true); });
+  $('clock').addEventListener('click', backToNow);
   $('btn-list').addEventListener('click', () => openPanel(state.panel === 'list' ? null : 'list'));
   $('btn-info').addEventListener('click', () => openPanel(state.panel === 'info' ? null : 'info'));
   $('panel-close').addEventListener('click', () => openPanel(null));
@@ -804,6 +838,7 @@ function bindUI() {
   $('btn-locate').addEventListener('click', locate);
 
   bindTouch();
+  trackLayout();
   controls.addEventListener('change', () => { constrainView(); requestRender(); });
   addEventListener('resize', resize);
   document.addEventListener('visibilitychange', () => { if (!document.hidden) tick(); });
@@ -888,7 +923,6 @@ function locate() {
     const x = (p.coords.longitude - geo.lon0) * (111412.84 * Math.cos(lat0) - 93.5 * Math.cos(3 * lat0));
     const y = (p.coords.latitude - geo.lat0) * (111132.92 - 559.82 * Math.cos(2 * lat0) + 1.175 * Math.cos(4 * lat0));
     if (!showUser(x, y)) toast('Izvan si prikazanog područja – udaljenosti se ipak računaju od tebe.');
-    openPanel('list');
   }, () => {
     $('btn-locate').classList.remove('active');
     toast('Lokacija nije dostupna.');

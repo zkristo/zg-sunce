@@ -7,7 +7,7 @@
   <meta name="description" content="3D karta Zagreba u stvarnom vremenu: koji su kafići trenutno na suncu, a koji u sjeni.">
   <meta name="theme-color" content="#e9edf2">
   <!-- Raise ?v= on every release so phones do not keep an old copy (GitHub Pages caches for 10 min). -->
-  <link rel="stylesheet" href="style.css?v=6">
+  <link rel="stylesheet" href="style.css?v=7">
   <script type="importmap">
   {
     "imports": {
@@ -52,14 +52,12 @@
   </section>
 
   <footer id="timebar">
-    <div class="timerow">
-      <output id="clock">--:--</output>
-      <span id="mode" class="live">uživo</span>
-      <span id="sunline"></span>
-      <button id="btn-now" hidden>Sada</button>
-    </div>
     <input id="slider" type="range" min="0" max="100" step="1" value="0" aria-label="Doba dana">
-    <div class="ticks"><span id="t-rise"></span><span id="t-day"></span><span id="t-set"></span></div>
+    <div class="ticks">
+      <span id="t-rise"></span>
+      <button id="clock" title="Vrati na sada" aria-label="Trenutno prikazano vrijeme; dodirni za povratak na sada">--:--</button>
+      <span id="t-set"></span>
+    </div>
   </footer>
 
   <div id="loading">Učitavanje grada…</div>
@@ -67,7 +65,7 @@
   <template id="tpl-info">
     <h2>O karti</h2>
     <p>Karta prikazuje gdje u Zagrebu – od Gornjeg grada preko Donjeg grada i Trnja do Novog Zagreba – trenutno pada sunce.
-      Položaj sunca računa se za stvarno vrijeme i osvježava svake minute, a klizačem možeš pogledati ostatak dana.</p>
+      Položaj sunca računa se za stvarno vrijeme i osvježava svake minute, a klizačem možeš pogledati ostatak dana (dodir na vrijeme vraća na sada).</p>
     <p><span class="dot sun"></span> terasa na suncu &nbsp; <span class="dot tree"></span> pod krošnjom &nbsp; <span class="dot shade"></span> terasa u sjeni zgrada</p>
     <p><strong>Koliko je točno?</strong> Zgrade su pojednostavljene u blokove do visine sljemena krova, a tende i
       suncobrani nisu u modelu. Stabla su iz gradskog katastra zelenila (samo javne površine, većinom stanje iz 2016.)
@@ -79,6 +77,6 @@
       naoblaka <a href="https://open-meteo.com/" target="_blank" rel="noopener">Open-Meteo</a>.</p>
   </template>
 
-  <script type="module" src="app.js?v=6"></script>
+  <script type="module" src="app.js?v=7"></script>
 </body>
 </html>
