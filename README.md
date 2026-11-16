@@ -1,6 +1,6 @@
 # Sunčane terase
 
-3D karta Zagreba (središte, Trnje i Novi Zagreb) u stvarnom vremenu: koje su terase kafića trenutno na suncu, a koje u sjeni.
+3D karta Zagreba (središte, Trnje i Novi Zagreb, sa Savom, ulicama i prugama) u stvarnom vremenu: koje su terase kafića trenutno na suncu, a koje u sjeni.
 
 - Sive zgrade + stvarne sjene za trenutni položaj sunca (osvježava se svake minute).
 - Klizač za ostatak dana, prognoza „na suncu do HH:MM” za svaki kafić.
@@ -22,6 +22,7 @@ Nema build koraka: `index.html` + `app.js` + `style.css`, biblioteke (three.js, 
 | `data/buildings.json`, `data/terrain.json` | [ZG3D 2022, Grad Zagreb](https://data.zagreb.hr/dataset/?q=zg3d) (Otvorena dozvola) | `python3 tools/build_buildings.py` |
 | `data/cafes.json` | © [OpenStreetMap](https://www.openstreetmap.org/copyright) doprinositelji (ODbL), Overpass API | `python3 tools/build_cafes.py` |
 | `data/trees.json` | Katastar zelenila Grada Zagreba ([javni ArcGIS sloj](https://services8.arcgis.com/Usi0jGQwMmBUpFjr/arcgis/rest/services/stablo_SpatialJoin/FeatureServer), bez navedene licence) | `python3 tools/build_trees.py` |
+| `data/map.json` | © [OpenStreetMap](https://www.openstreetmap.org/copyright) doprinositelji (ODbL): vode, ulice, pruge i tramvajske pruge | `python3 tools/build_map.py` |
 
 Alati koriste samo standardnu biblioteku Pythona, a preuzete datoteke spremaju u `tools/cache/`
 (obriši mapu za svježe podatke). Novi kvartovi dodaju se u popis `CORE` u `tools/build_buildings.py`.

@@ -16,6 +16,20 @@ const LEAF_ON = [415, 1031]; // deciduous trees carry leaves from 15 April to 31
 const TREE_CELL = 25; // m, lookup grid for the tree shade test
 const TREE_REACH = 250; // m, how far towards the sun a tree can still shade a terrace
 const TREE_MAX_DIST = 2000; // m, trees are not drawn when the camera is further away
+const DETAIL_MAX_DIST = 4000; // m, tram tracks and streams are not drawn when the camera is further away
+// Map overlays drawn on the ground: colour, lift above the terrain (m), polygon offset (draw order).
+const OVERLAY = {
+  water: [0xa9bccb, 0.25, -2],
+  square: [0xd6d9dd, 0.3, -3],
+  road: [0xc4c8cd, 0.35, -4],
+  stream: [0xa9bccb, 0.4, -5],
+  tram: [0xa2a7ad, 0.45, -6],
+  rail: [0x8d939b, 0.5, -7],
+};
+const LINE_OVERLAY = { rail: 'rail', tram: 'tram', stream: 'stream' }; // all other line classes are roads
+const RIBBON_SAMPLE = 5; // m, ribbons test the terrain this often ...
+const RIBBON_TOLERANCE = 0.1; // m, ... and keep a vertex where leaving it out would cut more than this
+const AREA_STEP = { water: 60, square: 30 }; // m, longest triangle edge in water and square fills
 const TYPE_LABEL = { cafe: 'Kafić', bar: 'Bar', pub: 'Pub' };
 const HEMI_INTENSITY = 0.9;
 // Sun strength is raised as it gets lower so sunlit ground stays about equally bright all day.
@@ -52,9 +66,9 @@ let chunks, bvhTerrain; // chunks: [{ mesh, box, bvh }]
 let trees = null; // { n, x, y, z, rh, rv, evergreen, grid } — crowns are ellipsoids centred at (x, y, z)
 const treeGroup = new THREE.Group();
 const treeMats = {
-  leaf: new THREE.MeshLambertMaterial({ color: COLORS.tree, flatShading: true }),
+  leaf: new THREE.MeshLambertMaterial({ color: COLORS.tree, flatShading: true, shadowSide: THREE.FrontSide }),
   bare: new THREE.MeshLambertMaterial({ color: COLORS.tree, flatShading: true, transparent: true, opacity: 0.22, depthWrite: false }),
-  evergreen: new THREE.MeshLambertMaterial({ color: COLORS.evergreen, flatShading: true }),
+  evergreen: new THREE.MeshLambertMaterial({ color: COLORS.evergreen, flatShading: true, shadowSide: THREE.FrontSide }),
 };
 const deciduousMeshes = [];
 let needsRender = true;
@@ -146,6 +160,17 @@ function buildBuildings(parts) {
   return g;
 }
 
+// Height of the terrain mesh itself (its triangles, not the smoothed lookup of ground()),
+// so overlays can lie exactly on it.
+function terrainAt(x, y) {
+  const t = terrain;
+  const fx = Math.min(Math.max((x - t.x0) / t.cell, 0), t.nx - 1.001);
+  const fy = Math.min(Math.max((y - t.y0) / t.cell, 0), t.ny - 1.001);
+  const i = Math.floor(fx), j = Math.floor(fy), tx = fx - i, ty = fy - j;
+  const a = t.h[j * t.nx + i], b = t.h[j * t.nx + i + 1], c = t.h[(j + 1) * t.nx + i], d = t.h[(j + 1) * t.nx + i + 1];
+  return (tx >= ty ? a + (b - a) * tx + (d - b) * ty : a + (d - c) * tx + (c - a) * ty) / 10;
+}
+
 function buildTerrain(t) {
   const pos = new Float32Array(t.nx * t.ny * 3);
   const index = [];
@@ -203,6 +228,150 @@ function buildTrees(data) {
     treeGroup.add(mesh);
   }
   return t;
+}
+
+// ---------- map overlays: water, squares, roads, railways ----------
+
+const overlayGroups = {};
+for (const kind of Object.keys(OVERLAY)) overlayGroups[kind] = new THREE.Group();
+
+// Polyline -> flat strip on the terrain. Bridges run straight between the heights at their ends.
+function addRibbon(out, xy, half, lift, bridge) {
+  // Extra vertices only where the terrain bends under a segment (flat streets keep their two ends).
+  const pts = [];
+  for (let k = 0; k + 2 < xy.length; k += 2) {
+    const [x0, y0, x1, y1] = [xy[k], xy[k + 1], xy[k + 2], xy[k + 3]];
+    const n = Math.max(1, Math.ceil(Math.hypot(x1 - x0, y1 - y0) / RIBBON_SAMPLE));
+    const h = [];
+    for (let i = 0; i <= n; i++) h.push(terrainAt(x0 + ((x1 - x0) * i) / n, y0 + ((y1 - y0) * i) / n));
+    const keep = new Uint8Array(n + 1);
+    keep[0] = 1;
+    const split = (a, b) => {
+      let worst = 0, at = -1;
+      for (let i = a + 1; i < b; i++) {
+        const d = Math.abs(h[i] - (h[a] + ((h[b] - h[a]) * (i - a)) / (b - a)));
+        if (d > worst) { worst = d; at = i; }
+      }
+      if (worst > RIBBON_TOLERANCE) { keep[at] = 1; split(a, at); split(at, b); }
+    };
+    split(0, n);
+    for (let i = 0; i < n; i++) if (keep[i]) pts.push([x0 + ((x1 - x0) * i) / n, y0 + ((y1 - y0) * i) / n]);
+  }
+  pts.push([xy[xy.length - 2], xy[xy.length - 1]]);
+  const h0 = terrainAt(...pts[0]), h1 = terrainAt(...pts[pts.length - 1]);
+  const side = [];
+  for (let i = 0; i < pts.length; i++) {
+    const a = pts[Math.max(0, i - 1)], b = pts[Math.min(pts.length - 1, i + 1)];
+    let nx = -(b[1] - a[1]), ny = b[0] - a[0];
+    const len = Math.hypot(nx, ny) || 1;
+    nx /= len;
+    ny /= len;
+    // Mitre: widen at bends so the strip keeps its width (limited at sharp corners).
+    let m = 1;
+    if (i > 0 && i < pts.length - 1) {
+      const dx = pts[i][0] - a[0], dy = pts[i][1] - a[1], dl = Math.hypot(dx, dy) || 1;
+      m = 1 / Math.max(0.5, Math.abs((-dy / dl) * nx + (dx / dl) * ny));
+    }
+    const h = bridge ? h0 + ((h1 - h0) * i) / (pts.length - 1) + 1 : null;
+    for (const s of [1, -1]) {
+      const x = pts[i][0] + s * nx * half * m, y = pts[i][1] + s * ny * half * m;
+      side.push(x, (h ?? terrainAt(x, y)) + lift, -y);
+    }
+  }
+  for (let i = 0; i + 1 < pts.length; i++) {
+    const l0 = 6 * i, r0 = l0 + 3, l1 = l0 + 6, r1 = l0 + 9;
+    for (const v of [l0, r0, l1, r0, r1, l1]) out.push(side[v], side[v + 1], side[v + 2]);
+  }
+}
+
+function insideRing(x, y, ring) {
+  let c = false;
+  for (let i = 0, j = ring.length - 2; i < ring.length; j = i, i += 2) {
+    if ((ring[i + 1] > y) !== (ring[j + 1] > y) && x < ring[j] + ((y - ring[j + 1]) * (ring[i] - ring[j])) / (ring[i + 1] - ring[j + 1])) c = !c;
+  }
+  return c;
+}
+
+// Polygon with holes -> triangles on the terrain, split until no edge is longer than AREA_STEP.
+function addArea(out, rings, lift, step) {
+  const [outer, ...holes] = rings;
+  const kept = [outer, ...holes.filter((h) => insideRing(h[0], h[1], outer))];
+  const toVec = (r) => { const v = []; for (let k = 0; k < r.length; k += 2) v.push(new THREE.Vector2(r[k], r[k + 1])); return v; };
+  const vecs = kept.map(toVec);
+  const verts = vecs.flat().map((p) => [p.x, p.y]);
+  let tris = THREE.ShapeUtils.triangulateShape(vecs[0], vecs.slice(1)).flat();
+  const L2 = step * step;
+  const long = (a, b) => (verts[a][0] - verts[b][0]) ** 2 + (verts[a][1] - verts[b][1]) ** 2 > L2;
+  for (let pass = 0; pass < 12; pass++) {
+    // An edge is split exactly when it is long, so both triangles sharing it agree (no cracks).
+    const mids = new Map(), next = [];
+    const mid = (a, b) => {
+      const key = a < b ? a * 4194304 + b : b * 4194304 + a;
+      if (!mids.has(key)) { mids.set(key, verts.length); verts.push([(verts[a][0] + verts[b][0]) / 2, (verts[a][1] + verts[b][1]) / 2]); }
+      return mids.get(key);
+    };
+    for (let t = 0; t < tris.length; t += 3) {
+      const v = [tris[t], tris[t + 1], tris[t + 2]];
+      const L = [long(v[0], v[1]), long(v[1], v[2]), long(v[2], v[0])];
+      const n = L.filter(Boolean).length;
+      if (n === 0) next.push(...v);
+      else if (n === 3) {
+        const x = mid(v[0], v[1]), y = mid(v[1], v[2]), z = mid(v[2], v[0]);
+        next.push(v[0], x, z, x, v[1], y, z, y, v[2], x, y, z);
+      } else if (n === 1) {
+        const i = L.indexOf(true), a = v[i], b = v[(i + 1) % 3], c = v[(i + 2) % 3], x = mid(a, b);
+        next.push(a, x, c, x, b, c);
+      } else {
+        const i = L.indexOf(false), c = v[i], a = v[(i + 1) % 3], b = v[(i + 2) % 3]; // short edge c-a
+        const x = mid(a, b), y = mid(b, c);
+        next.push(a, x, y, a, y, c, x, b, y);
+      }
+    }
+    if (next.length === tris.length) break;
+    tris = next;
+  }
+  for (const k of tris) out.push(verts[k][0], terrainAt(verts[k][0], verts[k][1]) + lift, -verts[k][1]);
+}
+
+function buildMap(data) {
+  const buckets = new Map(); // kind|chunk -> positions
+  const bucket = (kind, x, y) => {
+    const key = kind + '|' + Math.floor(x / CHUNK) + ',' + Math.floor(y / CHUNK);
+    if (!buckets.has(key)) buckets.set(key, []);
+    return buckets.get(key);
+  };
+  for (const [kind, ...rings] of data.areas) {
+    const name = kind === 0 ? 'water' : 'square';
+    const r = rings.map((ring) => ring.map((v) => v / 10));
+    addArea(bucket(name, r[0][0], r[0][1]), r, OVERLAY[name][1], AREA_STEP[name]);
+  }
+  for (const [cls, bridge, ...coords] of data.lines) {
+    const [name, width] = data.classes[cls];
+    const kind = LINE_OVERLAY[name] || 'road';
+    const xy = coords.map((v) => v / 10);
+    addRibbon(bucket(kind, xy[0], xy[1]), xy, width / 20, OVERLAY[kind][1] + (bridge ? 0.05 : 0), bridge);
+  }
+  for (const [key, pos] of buckets) {
+    const kind = key.split('|')[0];
+    const [color, , units] = OVERLAY[kind];
+    const g = new THREE.BufferGeometry();
+    g.setAttribute('position', new THREE.BufferAttribute(new Float32Array(pos), 3));
+    const mesh = new THREE.Mesh(g, overlayMaterial(color, units));
+    mesh.receiveShadow = true;
+    g.computeBoundingSphere();
+    overlayGroups[kind].add(mesh);
+  }
+  for (const group of Object.values(overlayGroups)) scene.add(group);
+}
+
+const overlayMats = new Map();
+function overlayMaterial(color, units) {
+  if (!overlayMats.has(color + ':' + units)) {
+    overlayMats.set(color + ':' + units, new THREE.MeshLambertMaterial({
+      color, flatShading: true, side: THREE.DoubleSide, polygonOffset: true, polygonOffsetFactor: -1, polygonOffsetUnits: units,
+    }));
+  }
+  return overlayMats.get(color + ':' + units);
 }
 
 let leafShown = true;
@@ -366,8 +535,12 @@ function updateShadowFrustum() {
   cam.near = 100;
   cam.far = 100 + 2 * depth;
   cam.updateProjectionMatrix();
-  // Back faces cast the shadows, so a small bias is enough; a large one leaks light along wall bases.
-  sun.shadow.bias = -(0.1 + size / sun.shadow.mapSize.x) / (2 * depth);
+  // Sun-facing sides cast the shadows (shadowSide: FrontSide on the materials), so the caster is
+  // a building's thickness away from the ground behind it and shadows start right at the wall base.
+  // A depth bias of one shadow texel keeps the lit faces themselves free of self-shadowing; a normal
+  // bias is avoided because it shortens shadows on the ground at low sun.
+  const texel = (2 * size) / sun.shadow.mapSize.x;
+  sun.shadow.bias = -texel / (2 * depth);
   sun.target.position.copy(controls.target);
   sun.position.copy(controls.target).addScaledVector(state.sunDir, depth + 100);
 }
@@ -584,7 +757,9 @@ function frame() {
   if (!needsRender) return;
   needsRender = false;
   updateShadowFrustum();
-  treeGroup.visible = camera.position.distanceTo(controls.target) < TREE_MAX_DIST;
+  const camDist = camera.position.distanceTo(controls.target);
+  treeGroup.visible = camDist < TREE_MAX_DIST;
+  overlayGroups.tram.visible = overlayGroups.stream.visible = camDist < DETAIL_MAX_DIST;
   renderer.render(scene, camera);
   $('needle').style.transform = `rotate(${controls.getAzimuthalAngle()}rad)`;
 }
@@ -745,7 +920,10 @@ async function updateCloud() {
 async function main() {
   const load = (name) => fetch(`data/${name}.json`).then((r) => { if (!r.ok) throw new Error(name); return r.json(); });
   let treeData;
-  [geo, terrain, cafes, treeData] = await Promise.all([load('buildings'), load('terrain'), load('cafes'), load('trees').catch(() => null)]);
+  let mapData;
+  [geo, terrain, cafes, treeData, mapData] = await Promise.all([
+    load('buildings'), load('terrain'), load('cafes'), load('trees').catch(() => null), load('map').catch(() => null),
+  ]);
 
   bounds = { minX: Infinity, maxX: -Infinity, minY: Infinity, maxY: -Infinity };
   for (const p of geo.parts.slice(0, geo.core)) {
@@ -759,7 +937,7 @@ async function main() {
     if (!cells.has(key)) cells.set(key, []);
     cells.get(key).push(p);
   }
-  const material = new THREE.MeshLambertMaterial({ color: COLORS.building, flatShading: true });
+  const material = new THREE.MeshLambertMaterial({ color: COLORS.building, flatShading: true, shadowSide: THREE.FrontSide });
   chunks = [...cells.values()].map((parts) => {
     const mesh = new THREE.Mesh(buildBuildings(parts), material);
     mesh.castShadow = mesh.receiveShadow = true;
@@ -773,6 +951,7 @@ async function main() {
   geo.parts = null;
 
   if (treeData) trees = buildTrees(treeData);
+  if (mapData) buildMap(mapData);
   scene.add(treeGroup);
 
   for (const c of cafes) {
