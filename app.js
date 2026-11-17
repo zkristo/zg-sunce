@@ -63,12 +63,13 @@ const state = {
 
 let geo, terrain, cafes, bounds;
 let chunks, bvhTerrain; // chunks: [{ mesh, box, bvh }]
+let relief = []; // height ranges for the shadow map, see buildRelief
 let trees = null; // { n, x, y, z, rh, rv, evergreen, grid } — crowns are ellipsoids centred at (x, y, z)
 const treeGroup = new THREE.Group();
 const treeMats = {
-  leaf: new THREE.MeshLambertMaterial({ color: COLORS.tree, flatShading: true, shadowSide: THREE.FrontSide }),
+  leaf: new THREE.MeshLambertMaterial({ color: COLORS.tree, flatShading: true }),
   bare: new THREE.MeshLambertMaterial({ color: COLORS.tree, flatShading: true, transparent: true, opacity: 0.22, depthWrite: false }),
-  evergreen: new THREE.MeshLambertMaterial({ color: COLORS.evergreen, flatShading: true, shadowSide: THREE.FrontSide }),
+  evergreen: new THREE.MeshLambertMaterial({ color: COLORS.evergreen, flatShading: true }),
 };
 const deciduousMeshes = [];
 let needsRender = true;
@@ -117,7 +118,8 @@ function ground(x, y) {
   return (a * (1 - ty) + b * ty) / 10;
 }
 
-// Every part becomes a prism: shared bottom/top vertices, walls + roof (flat shading needs no normals).
+// Every part becomes a closed prism: shared bottom/top vertices, walls, roof and floor (flat shading
+// needs no normals). The floor is never seen, but it closes the prism for the shadow map.
 function buildBuildings(parts) {
   let nPoints = 0;
   for (const p of parts) for (let r = 2; r < p.length; r++) nPoints += p[r].length / 2;
@@ -151,6 +153,7 @@ function buildBuildings(parts) {
       const A = flat[a], B = flat[b], C = flat[c];
       const ccw = (B.x - A.x) * (C.y - A.y) - (B.y - A.y) * (C.x - A.x) > 0;
       index.push(v + n + a, v + n + (ccw ? b : c), v + n + (ccw ? c : b));
+      index.push(v + a, v + (ccw ? c : b), v + (ccw ? b : c));
     }
     v += 2 * n;
   }
@@ -529,20 +532,52 @@ function updateShadowFrustum() {
   const dist = camera.position.distanceTo(controls.target);
   const size = Math.min(6500, Math.max(350, dist * 1.4));
   const depth = 1.5 * size + 400; // how far along the sun ray shadow casters can be from the pivot
-  const cam = sun.shadow.camera;
-  cam.left = cam.bottom = -size;
-  cam.right = cam.top = size;
+  const t = controls.target, cam = sun.shadow.camera;
+  // The shadow map looks down the sun ray with "up" pointing up, so its vertical axis only has to
+  // span the ground (foreshortened by the sun's height) plus the heights within it. At a low sun
+  // that is a fraction of the square that was used before, and the map gets that much sharper
+  // along the sun's direction, where shadow edges used to break into saw-teeth.
+  const sinA = Math.max(state.sunDir.y, 0.03), cosA = Math.sqrt(1 - sinA * sinA), r = size * Math.SQRT2;
+  let lo = 0, hi = 0;
+  for (const b of relief) {
+    if (b.x1 < t.x - r || b.x0 > t.x + r || b.z1 < t.z - r || b.z0 > t.z + r) continue;
+    lo = Math.min(lo, b.lo - t.y);
+    hi = Math.max(hi, b.hi - t.y);
+  }
+  cam.left = -size;
+  cam.right = size;
+  cam.bottom = Math.max(-size, -size * sinA + lo * cosA - 20);
+  cam.top = Math.min(size, size * sinA + hi * cosA + 20);
   cam.near = 100;
   cam.far = 100 + 2 * depth;
   cam.updateProjectionMatrix();
-  // Sun-facing sides cast the shadows (shadowSide: FrontSide on the materials), so the caster is
-  // a building's thickness away from the ground behind it and shadows start right at the wall base.
-  // A depth bias of one shadow texel keeps the lit faces themselves free of self-shadowing; a normal
-  // bias is avoided because it shortens shadows on the ground at low sun.
-  const texel = (2 * size) / sun.shadow.mapSize.x;
-  sun.shadow.bias = -texel / (2 * depth);
-  sun.target.position.copy(controls.target);
-  sun.position.copy(controls.target).addScaledVector(state.sunDir, depth + 100);
+  // Shaded sides cast the shadows (three.js default), so lit roofs and walls can never shade
+  // themselves; the floors close the prisms so the ground right behind a wall is covered too.
+  // No depth bias is needed, and none is used: any bias shows up as a lit line along wall bases.
+  sun.shadow.bias = 0;
+  sun.target.position.copy(t);
+  sun.position.copy(t).addScaledVector(state.sunDir, depth + 100);
+}
+
+// Height ranges of the map in 600 m squares (ground, buildings, trees) for fitting the shadow map.
+function buildRelief() {
+  const out = [], tr = terrain, step = Math.round(CHUNK / tr.cell);
+  for (let j = 0; j < tr.ny - 1; j += step) {
+    for (let i = 0; i < tr.nx - 1; i += step) {
+      let lo = Infinity, hi = -Infinity;
+      for (let jj = j; jj <= Math.min(j + step, tr.ny - 1); jj++) {
+        for (let ii = i; ii <= Math.min(i + step, tr.nx - 1); ii++) {
+          const h = tr.h[jj * tr.nx + ii] / 10;
+          lo = Math.min(lo, h);
+          hi = Math.max(hi, h);
+        }
+      }
+      const x0 = tr.x0 + i * tr.cell, y0 = tr.y0 + j * tr.cell;
+      out.push({ x0, x1: x0 + step * tr.cell, z0: -(y0 + step * tr.cell), z1: -y0, lo, hi: hi + 35 }); // + tallest trees
+    }
+  }
+  for (const c of chunks) out.push({ x0: c.box.min.x, x1: c.box.max.x, z0: c.box.min.z, z1: c.box.max.z, lo: c.box.min.y, hi: c.box.max.y });
+  return out;
 }
 
 function applyTime() {
@@ -971,7 +1006,7 @@ async function main() {
     if (!cells.has(key)) cells.set(key, []);
     cells.get(key).push(p);
   }
-  const material = new THREE.MeshLambertMaterial({ color: COLORS.building, flatShading: true, shadowSide: THREE.FrontSide });
+  const material = new THREE.MeshLambertMaterial({ color: COLORS.building, flatShading: true });
   chunks = [...cells.values()].map((parts) => {
     const mesh = new THREE.Mesh(buildBuildings(parts), material);
     mesh.castShadow = mesh.receiveShadow = true;
@@ -982,6 +1017,7 @@ async function main() {
   const land = new THREE.Mesh(buildTerrain(terrain), new THREE.MeshLambertMaterial({ color: COLORS.ground }));
   land.receiveShadow = true;
   scene.add(land);
+  relief = buildRelief();
   geo.parts = null;
 
   if (treeData) trees = buildTrees(treeData);
