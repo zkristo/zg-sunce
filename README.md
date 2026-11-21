@@ -1,6 +1,6 @@
 # Sunčane terase
 
-3D karta Zagreba (središte, Trnje i Novi Zagreb, sa Savom, ulicama i prugama) u stvarnom vremenu: koje su terase kafića trenutno na suncu, a koje u sjeni.
+3D karta cijelog Zagreba (svih 17 gradskih četvrti, sa Savom, ulicama i prugama) u stvarnom vremenu: koje su terase kafića trenutno na suncu, a koje u sjeni.
 
 - Sive zgrade + stvarne sjene za trenutni položaj sunca (osvježava se svake minute).
 - Klizač za ostatak dana, prognoza „na suncu do HH:MM” za svaki kafić.
@@ -25,7 +25,9 @@ Nema build koraka: `index.html` + `app.js` + `style.css`, biblioteke (three.js, 
 | `data/map.json` | © [OpenStreetMap](https://www.openstreetmap.org/copyright) doprinositelji (ODbL): vode, ulice, pruge i tramvajske pruge | `python3 tools/build_map.py` |
 
 Alati koriste samo standardnu biblioteku Pythona (osim `fetch_overture.py`, kojem treba DuckDB), a preuzete datoteke spremaju u `tools/cache/`
-(obriši mapu za svježe podatke). Novi kvartovi dodaju se u popis `CORE` u `tools/build_buildings.py`.
+(obriši mapu za svježe podatke — i nakon promjene područja, jer imena spremljenih datoteka ne ovise o njemu).
+Četvrti su popisane u `DISTRICTS` u `tools/build_buildings.py`. Popis kafića osvježava se sam prvog u mjesecu
+(GitHub Actions, `.github/workflows/refresh-cafes.yml`; može se pokrenuti i ručno u kartici Actions).
 
 ## Ograničenja modela
 

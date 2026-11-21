@@ -1,0 +1,42 @@
+# Rebuilds data/cafes.json from OpenStreetMap and Overture Maps once a month and commits it
+# if anything changed; GitHub Pages then serves the new list. Can also be started by hand
+# (Actions tab → Refresh cafés → Run workflow).
+name: Refresh cafés
+
+on:
+  schedule:
+    - cron: "17 3 1 * *" # 03:17 UTC on the 1st of every month
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pages: write
+
+jobs:
+  refresh:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install duckdb
+      - name: Download Overture places
+        run: python3 tools/fetch_overture.py
+      - name: Build the café list
+        run: python3 tools/build_cafes.py
+      - name: Commit and publish if changed
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if git diff --quiet data/cafes.json; then
+            echo "Café list unchanged."
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898299+github-actions[bot]@users.noreply.github.com"
+          git commit -m "Refresh cafés from OpenStreetMap and Overture Maps" data/cafes.json
+          git push
+          # Pushes made with the workflow token do not always start a Pages build, so ask for one.
+          gh api -X POST "repos/${{ github.repository }}/pages/builds" || true

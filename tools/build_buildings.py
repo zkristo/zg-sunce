@@ -11,27 +11,26 @@ from collections import defaultdict
 from common import LAT0, LON0, Terrain, fetch, to_local, write_json
 
 CKAN = "https://data.zagreb.hr/api/3/action/package_show?id="
-# Districts shown in the app.
-CORE = [
+# All 17 city districts (gradske četvrti) of Zagreb.
+DISTRICTS = [
     "zg3d-gradska-cetvrt-donji-grad-2022",
     "zg3d-gradska-cetvrt-gornji-grad-2022",
     "zg3d-gradska-cetvrt-trnje-2022",
+    "zg3d-gradska-cetvrt-maksimir-2022",
+    "zg3d-gradska-cetvrt-pescenica-zitnjak-2022",
     "zg3d-gradska-cetvrt-novi-zagreb-istok-2022",
     "zg3d-gradska-cetvrt-novi-zagreb-zapad-2022",
-]
-# Novi Zagreb districts reach far into the villages around the city; core parts west or south
-# of these limits (local metres) are treated like neighbours.
-CORE_MIN_X, CORE_MIN_Y = -5000, -8000
-# Neighbouring districts: only parts within BUFFER m of the core are kept (shadow casters).
-NEIGHBOURS = [
-    "zg3d-gradska-cetvrt-crnomerec-2022",
     "zg3d-gradska-cetvrt-tresnjevka-sjever-2022",
     "zg3d-gradska-cetvrt-tresnjevka-jug-2022",
-    "zg3d-gradska-cetvrt-pescenica-zitnjak-2022",
-    "zg3d-gradska-cetvrt-maksimir-2022",
+    "zg3d-gradska-cetvrt-crnomerec-2022",
+    "zg3d-gradska-cetvrt-gornja-dubrava-2022",
+    "zg3d-gradska-cetvrt-donja-dubrava-2022",
+    "zg3d-gradska-cetvrt-stenjevec-2022",
+    "zg3d-gradska-cetvrt-podsused-vrapce-2022",
     "zg3d-gradska-cetvrt-podsljeme-2022",
+    "zg3d-gradska-cetvrt-sesvete",
+    "zg3d-gradska-cetvrt-brezovica-2022",
 ]
-BUFFER = 300
 MIN_HEIGHT = 2.0  # m
 MIN_AREA = 4.0  # m2
 TERRAIN_CELL = 40  # m
@@ -167,26 +166,13 @@ def build_terrain(parts):
 
 
 def main():
-    print("Loading core districts")
-    core, candidates = [], []
-    for slug in CORE:
-        for part in parts_of(load_district(slug)):
-            cx, cy = centroid(part[0][0])
-            (core if cx >= CORE_MIN_X and cy >= CORE_MIN_Y else candidates).append(part)
-    cells = {(int(x // 100), int(y // 100)) for rings, _, _ in core for x, y in rings[0]}
-    reach = BUFFER // 100
-    near_cells = {(i + di, j + dj) for i, j in cells for di in range(-reach, reach + 1) for dj in range(-reach, reach + 1)}
-
-    print("Loading neighbouring districts")
-    for slug in NEIGHBOURS:
-        candidates.extend(parts_of(load_district(slug)))
-    ring_parts = []
-    for part in candidates:
-        cx, cy = centroid(part[0][0])
-        if (int(cx // 100), int(cy // 100)) in near_cells:
-            ring_parts.append(part)
-    parts = core + ring_parts
-    print(f"  {len(core)} core parts + {len(ring_parts)} buffer parts")
+    print("Loading districts")
+    parts = []
+    for slug in DISTRICTS:
+        n = len(parts)
+        parts.extend(parts_of(load_district(slug)))
+        print(f"  {slug}: {len(parts) - n} parts")
+    core = parts
 
     print("Building terrain")
     terrain = build_terrain(parts)
@@ -211,7 +197,7 @@ def main():
 
     # parts: [base_dm, top_dm, outer_ring, hole, ...]; rings are flat [x, y, ...] in decimetres,
     # x = east, y = north of the origin; heights are decimetres above z0. The first `core` parts
-    # belong to the displayed districts, the rest are shadow casters around them.
+    # belong to the displayed districts (now all of them), the rest would be shadow casters around them.
     write_json("buildings.json", {"lat0": LAT0, "lon0": LON0, "z0": z0, "core": n_core, "parts": out})
     write_json(
         "terrain.json",
