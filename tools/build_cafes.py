@@ -14,9 +14,8 @@ import re
 import unicodedata
 from collections import Counter, defaultdict
 
-from common import CACHE, DATA, Index, Terrain, core_bbox, fetch, load_buildings, to_local, to_lonlat, write_json
+from common import CACHE, DATA, Index, Terrain, core_bbox, load_buildings, overpass, to_local, to_lonlat, write_json
 
-OVERPASS = "https://overpass-api.de/api/interpreter"
 OVERTURE = os.path.join(CACHE, "overture.places.json")  # written by tools/fetch_overture.py
 KEEP_CLEARANCE = 1.0  # m: points at least this far from any wall are left where they are
 TERRACE_CLEARANCE = 2.5  # m: moved points end up this far from the nearest wall
@@ -62,7 +61,7 @@ def footprint_area(ring):
 def osm_places(parts, n_core):
     w, s, e, n = core_bbox(parts, n_core)
     query = f'[out:json][timeout:120];nwr["amenity"~"^(cafe|bar|pub)$"]({s:.5f},{w:.5f},{n:.5f},{e:.5f});out center tags;'
-    with open(fetch(OVERPASS, "cafes.overpass.json", data={"data": query}), encoding="utf-8") as f:
+    with open(overpass(query, "cafes.overpass.json"), encoding="utf-8") as f:
         elements = json.load(f)["elements"]
     places = []
     for el in elements:

@@ -9,9 +9,8 @@ import math
 import os
 from collections import Counter
 
-from common import DATA, fetch, to_local, to_lonlat, write_json
+from common import DATA, overpass, to_local, to_lonlat, write_json
 
-OVERPASS = "https://overpass-api.de/api/interpreter"
 SIMPLIFY = 0.5  # m, Douglas-Peucker tolerance
 
 # Line classes: (name, drawn width in m). Order is the order in data/map.json "classes".
@@ -167,7 +166,7 @@ def main():
   relation["natural"="water"]({bb});
 );
 out geom;"""
-    with open(fetch(OVERPASS, "map.overpass.json", data={"data": query}, timeout=400), encoding="utf-8") as f:
+    with open(overpass(query, "map.overpass.json", timeout=400), encoding="utf-8") as f:
         elements = json.load(f)["elements"]
 
     lines, areas, stats = [], [], Counter()

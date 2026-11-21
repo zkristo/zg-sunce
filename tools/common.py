@@ -52,6 +52,27 @@ def fetch(url, cache_name, data=None, timeout=180):
     return path
 
 
+# Public Overpass API servers, tried in order: the main one is not reachable from every network
+# (GitHub Actions machines, for one).
+OVERPASS_SERVERS = [
+    "https://overpass-api.de/api/interpreter",
+    "https://maps.mail.ru/osm/tools/overpass/api/interpreter",
+    "https://overpass.private.coffee/api/interpreter",
+    "https://overpass.kumi.systems/api/interpreter",
+]
+
+
+def overpass(query, cache_name, timeout=180):
+    """Run an Overpass query (cached like fetch) on the first server that answers."""
+    for i, url in enumerate(OVERPASS_SERVERS):
+        try:
+            return fetch(url, cache_name, data={"data": query}, timeout=timeout)
+        except OSError as e:
+            if i == len(OVERPASS_SERVERS) - 1:
+                raise
+            print(f"  {url} failed ({e}); trying the next Overpass server")
+
+
 def write_json(name, obj):
     os.makedirs(DATA, exist_ok=True)
     path = os.path.join(DATA, name)
