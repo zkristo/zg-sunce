@@ -86,6 +86,14 @@ def load_buildings():
     return parts, b["core"]
 
 
+def core_bbox(parts, n_core):
+    """(west, south, east, north) in degrees around the displayed districts' buildings."""
+    pts = [p for rings in parts[:n_core] for p in rings[0]]
+    w, s = to_lonlat(min(p[0] for p in pts), min(p[1] for p in pts))
+    e, n = to_lonlat(max(p[0] for p in pts), max(p[1] for p in pts))
+    return w, s, e, n
+
+
 def seg_dist(px, py, a, b):
     dx, dy = b[0] - a[0], b[1] - a[1]
     t = ((px - a[0]) * dx + (py - a[1]) * dy) / ((dx * dx + dy * dy) or 1e-9)

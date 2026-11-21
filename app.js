@@ -645,7 +645,8 @@ function cafePanel(c) {
     el('div', { class: 'ticks' }, el('span', {}, hhmm(d.sunrise)), el('span', {}, d.tomorrow ? 'sunce sutra' : 'sunce danas'), el('span', {}, hhmm(d.sunset))),
     el('div', { class: 'links' },
       el('a', { href: `https://www.google.com/maps/search/?api=1&query=${c.lat},${c.lon}`, target: '_blank', rel: 'noopener' }, 'Google karte'),
-      el('a', { href: `https://www.openstreetmap.org/${{ n: 'node', w: 'way', r: 'relation' }[c.id[0]]}/${c.id.slice(1)}`, target: '_blank', rel: 'noopener' }, 'OpenStreetMap')),
+      // Cafés from Overture Maps (id "o…") have no OpenStreetMap page.
+      c.id[0] === 'o' ? '' : el('a', { href: `https://www.openstreetmap.org/${{ n: 'node', w: 'way', r: 'relation' }[c.id[0]]}/${c.id.slice(1)}`, target: '_blank', rel: 'noopener' }, 'OpenStreetMap')),
   ];
 }
 
