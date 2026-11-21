@@ -15,6 +15,9 @@ OVERPASS = "https://overpass-api.de/api/interpreter"
 KEEP_CLEARANCE = 1.0  # m: points at least this far from any wall are left where they are
 TERRACE_CLEARANCE = 2.5  # m: moved points end up this far from the nearest wall
 SEARCH_RADIUS = 30  # m
+# Cafés just outside the displayed districts are kept too: the model has buildings 300 m beyond
+# the district edge, so within this margin there are still enough shadow casters around them.
+EDGE_MARGIN = 100  # m
 
 
 def terrace_point(index, x, y):
@@ -34,6 +37,7 @@ def terrace_point(index, x, y):
 def main():
     parts, n_core = load_buildings()
     index = Index(parts)
+    core = Index(parts[:n_core])
     with open(os.path.join(DATA, "terrain.json"), encoding="utf-8") as f:
         t = json.load(f)
     terrain = Terrain(t["x0"], t["y0"], t["cell"], t["nx"], t["ny"], [v / 10 for v in t["h"]])
@@ -53,9 +57,9 @@ def main():
         if lat is None or tags.get("access") == "private" or tags.get("outdoor_seating") == "no":
             continue
         x, y = to_local(lon, lat)
-        # Only cafés in the displayed districts: the nearest building must be a core one.
+        # Only cafés in or right next to the displayed districts.
         _, near = index.nearest(x, y, reach=3)
-        if near is None or near >= n_core:
+        if near is None or (near >= n_core and abs(core.nearest(x, y, reach=2)[0]) > EDGE_MARGIN):
             outside_area += 1
             continue
         pt = terrace_point(index, x, y)
