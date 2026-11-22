@@ -97,6 +97,9 @@ controls.maxDistance = 12000;
 controls.maxPolarAngle = 80 * DEG;
 controls.zoomToCursor = true;
 controls.touches.TWO = null; // two-finger gestures are handled in bindTouch
+// One finger and the left mouse button pan in bindPan, which keeps the grabbed spot under the pointer.
+controls.touches.ONE = null;
+controls.mouseButtons.LEFT = null;
 
 const hemi = new THREE.HemisphereLight(0xffffff, 0xd0d3d8, HEMI_INTENSITY);
 const sun = new THREE.DirectionalLight(0xffffff, SUN_MAX);
@@ -752,6 +755,7 @@ function animateView({ x, y, maxDist, theta }) {
   const travel = fromT.distanceTo(toT);
   // Long slides rise a little on the way so the route stays visible.
   const lift = Math.max(0, Math.min(travel * 0.5, 2500) - Math.max(from.radius, to.radius) * 0.5);
+  fling = null;
   tween = { t0: performance.now(), ms: Math.min(1800, 500 + travel * 0.35), from, to, fromT, toT, lift };
 }
 
@@ -824,6 +828,7 @@ function trackLayout() {
 function frame() {
   requestAnimationFrame(frame);
   stepTimeTween();
+  stepFling();
   stepTween();
   controls.update();
   if (!needsRender) return;
@@ -877,6 +882,7 @@ function bindUI() {
   $('btn-locate').addEventListener('click', locate);
 
   bindTouch();
+  bindPan();
   trackLayout();
   controls.addEventListener('change', () => { constrainView(); requestRender(); });
   addEventListener('resize', resize);
@@ -939,6 +945,85 @@ function bindTouch() {
     prev = cur;
     requestRender();
   });
+}
+
+// Panning as in Google Maps: the spot on the ground under the finger (or mouse) stays under it while dragging,
+// and a flick keeps the map gliding for a moment after letting go.
+const FLING_FRICTION = 300; // ms, time for a fling to slow to about a third
+let fling = null; // { vx, vz, t }: m per ms, last step
+function bindPan() {
+  const pointers = new Set();
+  const plane = new THREE.Plane(new THREE.Vector3(0, 1, 0), 0);
+  const caster = new THREE.Raycaster();
+  const hit = new THREE.Vector3();
+  let grab = null, track = [];
+  const groundAt = (e) => {
+    caster.setFromCamera(new THREE.Vector2((e.clientX / innerWidth) * 2 - 1, -(e.clientY / innerHeight) * 2 + 1), camera);
+    const p = caster.ray.intersectPlane(plane, hit);
+    // Near the horizon the ground point runs away to infinity; ignore those.
+    return p && p.distanceTo(camera.position) < 20 * camera.position.distanceTo(controls.target) ? p.clone() : null;
+  };
+  const start = (e) => {
+    plane.constant = -controls.target.y;
+    grab = groundAt(e);
+    track = [];
+  };
+  canvas.addEventListener('pointerdown', (e) => {
+    if (e.pointerType === 'mouse' && e.button !== 0) return;
+    pointers.add(e.pointerId);
+    fling = null;
+    if (pointers.size === 1) start(e);
+    else grab = null; // two fingers: bindTouch turns and zooms
+  });
+  canvas.addEventListener('pointermove', (e) => {
+    if (pointers.size !== 1 || !pointers.has(e.pointerId)) return;
+    if (!grab) return start(e); // the finger left after lifting the other one grabs again where it is
+    const p = groundAt(e);
+    if (!p) return;
+    const dx = grab.x - p.x, dz = grab.z - p.z;
+    controls.target.x += dx;
+    controls.target.z += dz;
+    camera.position.x += dx;
+    camera.position.z += dz;
+    constrainView();
+    requestRender();
+    track.push({ t: e.timeStamp, x: controls.target.x, z: controls.target.z }); // when the finger moved, not when handled
+    if (track.length > 6) track.shift();
+  });
+  const end = (e) => {
+    if (!pointers.delete(e.pointerId)) return;
+    if (pointers.size) {
+      grab = null;
+      return;
+    }
+    // Speed over the last ~150 ms of movement, if the finger was still moving when it lifted.
+    const now = e.timeStamp, last = track[track.length - 1], first = track.find((s) => now - s.t < 150);
+    if (grab && last && first && now - last.t < 80 && last.t > first.t) {
+      let vx = (last.x - first.x) / (last.t - first.t), vz = (last.z - first.z) / (last.t - first.t);
+      const max = 0.004 * camera.position.distanceTo(controls.target), speed = Math.hypot(vx, vz);
+      if (speed > max) { vx *= max / speed; vz *= max / speed; }
+      fling = { vx, vz, t: performance.now() };
+    }
+    grab = null;
+  };
+  canvas.addEventListener('pointerup', end);
+  canvas.addEventListener('pointercancel', end);
+}
+
+function stepFling() {
+  if (!fling) return;
+  const now = performance.now(), dt = Math.min(now - fling.t, 50), k = Math.exp(-dt / FLING_FRICTION);
+  fling.t = now;
+  const move = FLING_FRICTION * (1 - k); // distance covered over dt while the speed decays
+  controls.target.x += fling.vx * move;
+  controls.target.z += fling.vz * move;
+  camera.position.x += fling.vx * move;
+  camera.position.z += fling.vz * move;
+  fling.vx *= k;
+  fling.vz *= k;
+  constrainView();
+  requestRender();
+  if (Math.hypot(fling.vx, fling.vz) * 16 < 0.0005 * camera.position.distanceTo(controls.target)) fling = null;
 }
 
 function showUser(x, y) {
