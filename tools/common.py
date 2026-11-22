@@ -107,6 +107,12 @@ def load_buildings():
     return parts, b["core"]
 
 
+
+def load_building_tops():
+    """Roof height of every part in load_buildings() order, in m above z0 (the datum of data/terrain.json)."""
+    with open(os.path.join(DATA, "buildings.json"), encoding="utf-8") as f:
+        return [p[1] / 10 for p in json.load(f)["parts"]]
+
 def core_bbox(parts, n_core):
     """(west, south, east, north) in degrees around the displayed districts' buildings."""
     pts = [p for rings in parts[:n_core] for p in rings[0]]

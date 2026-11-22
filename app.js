@@ -1,6 +1,5 @@
 import * as THREE from 'three';
 import { MapControls } from 'three/addons/controls/MapControls.js';
-import { MeshBVH } from 'three-mesh-bvh';
 import SunCalc from 'suncalc';
 
 // Scene coordinates: X = east, Y = up (metres above data z0), Z = south. Data files use x = east, y = north.
@@ -57,12 +56,12 @@ const state = {
   selected: null,
   user: null, // { x, y } in data coordinates
   panel: null, // 'cafe' | 'list' | 'info'
-  ready: false, // BVH built, sun tests possible
+  ready: false, // map loaded, sun tests possible
   toastUntil: 0,
 };
 
 let geo, terrain, cafes, bounds;
-let chunks, bvhTerrain; // chunks: [{ mesh, box, bvh }]
+let chunks; // [{ mesh, box }]
 let trees = null; // { n, x, y, z, rh, rv, evergreen, grid } — crowns are ellipsoids centred at (x, y, z)
 const treeGroup = new THREE.Group();
 const treeMats = {
@@ -445,13 +444,12 @@ function sunAt(date) {
   return { alt: p.altitude, leaf: leafOn(date), dir: new THREE.Vector3(Math.sin(bearing) * ch, Math.sin(p.altitude), -Math.cos(bearing) * ch) };
 }
 
-const ray = new THREE.Ray();
+// Buildings and terrain: each café carries its skyline (tools/skyline.py), the highest angle above the
+// horizon that roofs or the ground reach in every degree of compass direction, in half degrees.
 function sunlit(cafe, s) {
   if (s.alt <= 0) return false;
-  ray.origin.set(cafe.x, cafe.z + EYE, -cafe.y);
-  ray.direction.copy(s.dir);
-  for (const c of chunks) if (ray.intersectsBox(c.box) && c.bvh.raycastFirst(ray, THREE.DoubleSide)) return false;
-  return !bvhTerrain.raycastFirst(ray, THREE.DoubleSide);
+  const azimuth = (Math.atan2(s.dir.x, -s.dir.z) / DEG + 360) % 360;
+  return s.alt / DEG > cafe.sky[Math.floor(azimuth) % 360] / 2;
 }
 
 // Does a tree crown stand between the terrace and the sun?
@@ -990,6 +988,7 @@ async function main() {
   scene.add(treeGroup);
 
   for (const c of cafes) {
+    c.sky = Uint8Array.from(atob(c.sky), (ch) => ch.charCodeAt(0));
     c.state = SHADE;
     c.sprite = new THREE.Sprite(mats.shade);
     c.sprite.position.set(c.x, c.z + 2, -c.y);
@@ -998,19 +997,13 @@ async function main() {
 
   controls.target.set(0, ground(0, 0), 0);
   camera.position.set(-260, controls.target.y + 560, 760);
+  state.ready = true;
+  markers.visible = true;
   bindUI();
   resize();
   tick(true);
   frame();
   $('loading').hidden = true;
-
-  // The BVH takes a moment to build; the map is already usable meanwhile.
-  await new Promise((r) => setTimeout(r, 30));
-  for (const c of chunks) c.bvh = new MeshBVH(c.mesh.geometry);
-  bvhTerrain = new MeshBVH(land.geometry);
-  state.ready = true;
-  markers.visible = true;
-  applyTime();
 
   setInterval(tick, 10000);
   updateCloud();

@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """Build data/cafes.json from OpenStreetMap (Overpass API) and Overture Maps. Run after build_buildings.py.
 
-OSM is the main source. Cafés and bars that only Overture knows are added when Overture is
+OSM is the main source. Every café also gets its skyline (see skyline.py), which the app uses for the
+building and terrain shade test; that part needs numpy. Cafés and bars that only Overture knows are added when Overture is
 confident about them; run tools/fetch_overture.py first to download them (otherwise OSM only).
 Café points usually sit inside the building, so every point is moved to the nearest open
 spot next to it (street or square) — an approximation of where the terrace is.
@@ -14,7 +15,8 @@ import re
 import unicodedata
 from collections import Counter, defaultdict
 
-from common import CACHE, DATA, Index, Terrain, core_bbox, load_buildings, overpass, to_local, to_lonlat, write_json
+from common import CACHE, DATA, Index, Terrain, core_bbox, load_building_tops, load_buildings, overpass, to_local, to_lonlat, write_json
+from skyline import Skylines, encode
 
 OVERTURE = os.path.join(CACHE, "overture.places.json")  # written by tools/fetch_overture.py
 KEEP_CLEARANCE = 1.0  # m: points at least this far from any wall are left where they are
@@ -174,6 +176,10 @@ def main():
             }
         )
     cafes.sort(key=lambda c: c["id"])
+    skylines = Skylines(parts, load_building_tops(), terrain)
+    for c in cafes:
+        # sky: 360 bytes (one per degree of compass direction, from north) = skyline angle × 2, base64
+        c["sky"] = encode(skylines.of(c["x"], c["y"], c["z"]))
     for k in sorted(stats):
         print(f"  {stats[k]:5d}  {k}")
     print(f"  {len(cafes)} cafés ({moved} moved out of buildings)")

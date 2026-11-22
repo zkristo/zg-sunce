@@ -24,7 +24,8 @@ Nema build koraka: `index.html` + `app.js` + `style.css`, biblioteke (three.js, 
 | `data/trees.json` | Katastar zelenila Grada Zagreba ([javni ArcGIS sloj](https://services8.arcgis.com/Usi0jGQwMmBUpFjr/arcgis/rest/services/stablo_SpatialJoin/FeatureServer), bez navedene licence) | `python3 tools/build_trees.py` |
 | `data/map.json` | © [OpenStreetMap](https://www.openstreetmap.org/copyright) doprinositelji (ODbL): vode, ulice, pruge i tramvajske pruge | `python3 tools/build_map.py` |
 
-Alati koriste samo standardnu biblioteku Pythona (osim `fetch_overture.py`, kojem treba DuckDB), a preuzete datoteke spremaju u `tools/cache/`
+Alati koriste standardnu biblioteku Pythona; `fetch_overture.py` treba DuckDB, a `build_cafes.py` numpy
+(`pip install -r tools/requirements.txt`), a preuzete datoteke spremaju u `tools/cache/`
 (obriši mapu za svježe podatke — i nakon promjene područja, jer imena spremljenih datoteka ne ovise o njemu).
 Četvrti su popisane u `DISTRICTS` u `tools/build_buildings.py`. Popis kafića osvježava se sam prvog u mjesecu
 (GitHub Actions, `.github/workflows/refresh-cafes.yml`; može se pokrenuti i ručno u kartici Actions).
@@ -34,4 +35,7 @@ Alati koriste samo standardnu biblioteku Pythona (osim `fetch_overture.py`, koje
 - Zgrade su prizme od tla do najviše točke krova (`Z_Max`), pa su sjene kosih krovova malo predugačke.
 - Teren je gruba mreža izvedena iz podnožja zgrada; tendi i suncobrana nema.
 - Stabla su samo ona s javnih površina, većinom stanje iz 2016.; visina i širina krošnje poznate su samo kao razredi, pa je svako stablo elipsoid približne veličine. Listopadna stabla bacaju sjenu od 15. travnja do 31. listopada. Terasa koju zaklanja samo krošnja prikazuje se zasebno („pod krošnjom”).
+- Sjena zgrada i terena računa se unaprijed: svaki kafić u `cafes.json` nosi svoj „obzor” (`tools/skyline.py`) —
+  najveći kut iznad horizonta do kojeg sežu krovovi ili tlo, za svaki stupanj smjera. Terasa je u sjeni kad je sunce
+  niže od obzora u svom smjeru.
 - OSM točka kafića obično je unutar zgrade, pa se pomiče na najbliži otvoreni prostor — to je procjena položaja terase.
