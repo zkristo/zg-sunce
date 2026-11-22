@@ -8,6 +8,7 @@ const DEG = Math.PI / 180;
 const STEP = 5 * 60 * 1000; // slider / schedule resolution
 const EYE = 1.2; // m above ground where a terrace is tested for sun
 const CHUNK = 600; // m, buildings are split into square chunks so off-screen ones are skipped
+const TERRAIN_TILE = 50; // terrain cells (2 km) per ground tile
 const COLORS = { tree: 0xb1c2ab, evergreen: 0x8fa692, building: 0xcfd2d6, ground: 0xe6e8ea, day: 0xe9edf2, night: 0x161b26, dusk: 0xf1dcc8, sunWarm: 0xffdcb8 };
 const SHADE = 0, TREE = 1, SUN = 2; // state of a terrace
 const STATE_NAME = ['shade', 'tree', 'sun'];
@@ -184,25 +185,48 @@ function terrainAt(x, y) {
   return (tx >= ty ? a + (b - a) * tx + (d - b) * ty : a + (d - c) * tx + (c - a) * ty) / 10;
 }
 
+// The ground in square tiles, so the tiles off screen are skipped like building chunks. Normals come from the
+// whole height grid (not tile by tile), so the shading has no seams at tile edges.
 function buildTerrain(t) {
-  const pos = new Float32Array(t.nx * t.ny * 3);
-  const index = [];
-  for (let j = 0; j < t.ny; j++) {
-    for (let i = 0; i < t.nx; i++) {
-      pos.set([t.x0 + i * t.cell, t.h[j * t.nx + i] / 10, -(t.y0 + j * t.cell)], (j * t.nx + i) * 3);
-      if (i < t.nx - 1 && j < t.ny - 1) {
-        const a = j * t.nx + i, b = a + 1, c = a + t.nx, d = c + 1;
-        index.push(a, b, d, a, d, c);
+  const group = new THREE.Group();
+  const material = new THREE.MeshLambertMaterial({ color: COLORS.ground });
+  const h = (i, j) => t.h[Math.min(Math.max(j, 0), t.ny - 1) * t.nx + Math.min(Math.max(i, 0), t.nx - 1)] / 10;
+  for (let j0 = 0; j0 < t.ny - 1; j0 += TERRAIN_TILE) {
+    for (let i0 = 0; i0 < t.nx - 1; i0 += TERRAIN_TILE) {
+      const w = Math.min(TERRAIN_TILE, t.nx - 1 - i0) + 1, d = Math.min(TERRAIN_TILE, t.ny - 1 - j0) + 1;
+      const pos = new Float32Array(w * d * 3), normal = new Float32Array(w * d * 3);
+      const index = new Uint16Array((w - 1) * (d - 1) * 6);
+      let k = 0;
+      for (let b = 0; b < d; b++) {
+        for (let a = 0; a < w; a++) {
+          const i = i0 + a, j = j0 + b, v = (b * w + a) * 3;
+          const ex = (h(i + 1, j) - h(i - 1, j)) / (2 * t.cell), ny = (h(i, j + 1) - h(i, j - 1)) / (2 * t.cell);
+          const len = Math.hypot(ex, 1, ny);
+          pos[v] = t.x0 + i * t.cell;
+          pos[v + 1] = h(i, j);
+          pos[v + 2] = -(t.y0 + j * t.cell);
+          normal[v] = -ex / len;
+          normal[v + 1] = 1 / len;
+          normal[v + 2] = ny / len;
+          if (a < w - 1 && b < d - 1) {
+            // Same diagonal as terrainAt(): triangles (i, j)(i+1, j)(i+1, j+1) and (i, j)(i+1, j+1)(i, j+1).
+            const p = b * w + a;
+            index.set([p, p + 1, p + w + 1, p, p + w + 1, p + w], k);
+            k += 6;
+          }
+        }
       }
+      const g = new THREE.BufferGeometry();
+      g.setAttribute('position', new THREE.BufferAttribute(pos, 3).onUpload(releaseArray));
+      g.setAttribute('normal', new THREE.BufferAttribute(normal, 3).onUpload(releaseArray));
+      g.setIndex(new THREE.BufferAttribute(index, 1).onUpload(releaseArray));
+      g.computeBoundingSphere();
+      const mesh = new THREE.Mesh(g, material);
+      mesh.receiveShadow = true;
+      group.add(mesh);
     }
   }
-  const g = new THREE.BufferGeometry();
-  g.setAttribute('position', new THREE.BufferAttribute(pos, 3));
-  g.setIndex(index);
-  g.computeVertexNormals();
-  g.computeBoundingSphere();
-  for (const a of [g.index, ...Object.values(g.attributes)]) a.onUpload(releaseArray);
-  return g;
+  return group;
 }
 
 const treeKey = (i, j) => (i + 4096) * 8192 + j + 4096;
@@ -988,9 +1012,7 @@ async function main() {
 
   const t = readBinary(terrainData, 'ZGT1');
   terrain = { ...t.header, h: new Int16Array(terrainData, t.start, t.header.nx * t.header.ny) };
-  const land = new THREE.Mesh(buildTerrain(terrain), new THREE.MeshLambertMaterial({ color: COLORS.ground }));
-  land.receiveShadow = true;
-  scene.add(land);
+  scene.add(buildTerrain(terrain));
 
   if (treeData) trees = buildTrees(treeData);
   if (mapData) buildMap(mapData);
