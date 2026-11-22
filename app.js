@@ -61,7 +61,7 @@ const state = {
 };
 
 let geo, terrain, cafes, bounds;
-let chunks; // [{ mesh, box }]
+let chunks; // building meshes, one per CHUNK square
 let trees = null; // { n, x, y, z, rh, rv, evergreen, grid } — crowns are ellipsoids centred at (x, y, z)
 const treeGroup = new THREE.Group();
 const treeMats = {
@@ -70,6 +70,7 @@ const treeMats = {
   evergreen: new THREE.MeshLambertMaterial({ color: COLORS.evergreen, flatShading: true, shadowSide: THREE.FrontSide }),
 };
 const deciduousMeshes = [];
+const buildingMaterial = new THREE.MeshLambertMaterial({ color: COLORS.building, flatShading: true, shadowSide: THREE.FrontSide });
 let needsRender = true;
 let tween = null;
 const schedules = new Map();
@@ -116,47 +117,60 @@ function ground(x, y) {
   return (a * (1 - ty) + b * ty) / 10;
 }
 
-// Every part becomes a prism: shared bottom/top vertices, walls + roof (flat shading needs no normals).
-function buildBuildings(parts) {
-  let nPoints = 0;
-  for (const p of parts) for (let r = 2; r < p.length; r++) nPoints += p[r].length / 2;
-  const pos = new Float32Array(nPoints * 2 * 3);
-  const index = [];
-  let v = 0;
-  for (const p of parts) {
-    const base = p[0] / 10, top = p[1] / 10;
-    const rings = [];
+// Once a buffer is on the GPU nothing reads it in JavaScript any more (no raycasts), so the copy is dropped.
+function releaseArray() { this.array = null; }
+
+// data/buildings.bin and data/terrain.bin (layout in tools/common.py): a 4-byte tag, the header length,
+// a JSON header, then little-endian arrays that are used in place.
+function readBinary(buf, tag) {
+  const text = new TextDecoder();
+  if (text.decode(new Uint8Array(buf, 0, 4)) !== tag) throw new Error(tag);
+  const length = new DataView(buf).getUint32(4, true);
+  return { header: JSON.parse(text.decode(new Uint8Array(buf, 8, length))), start: 8 + length };
+}
+
+// One chunk of buildings: every part is a prism (bottom and top vertices, walls, roof triangulated offline).
+// Positions stay 16-bit decimetres relative to the chunk origin; the mesh is scaled and moved into place.
+function buildBuildings(buf, [x0, y0, nParts, nRings, nVerts, nTris, offset]) {
+  const heights = new Int16Array(buf, offset, 2 * nParts);
+  const coords = new Int16Array(buf, offset + 4 * nParts, 2 * nVerts);
+  const u8 = new Uint8Array(buf, offset + 4 * nParts + 4 * nVerts, 2 * nParts + nRings + 3 * nTris);
+  const SIZES = nParts, ROOFS = nParts + nRings, ROOF = 2 * nParts + nRings;
+  const pos = new Int16Array(nVerts * 6);
+  const index = new Uint16Array(nVerts * 6 + nTris * 3);
+  let v = 0, r = 0, k = 0, t = ROOF, ii = 0;
+  for (let p = 0; p < nParts; p++) {
+    const base = heights[2 * p], top = heights[2 * p + 1];
     let n = 0;
-    for (let r = 2; r < p.length; r++) {
-      const ring = [];
-      for (let k = 0; k < p[r].length; k += 2) ring.push(new THREE.Vector2(p[r][k] / 10, p[r][k + 1] / 10));
-      rings.push(ring);
-      n += ring.length;
-    }
-    const flat = rings.flat();
-    flat.forEach((pt, k) => {
-      pos.set([pt.x, base, -pt.y], (v + k) * 3);
-      pos.set([pt.x, top, -pt.y], (v + n + k) * 3);
-    });
+    for (let q = 0; q < u8[p]; q++) n += u8[SIZES + r + q];
     let o = v;
-    for (const ring of rings) {
-      for (let k = 0; k < ring.length; k++) {
-        const a = o + k, b = o + ((k + 1) % ring.length);
-        index.push(a, b, b + n, a, b + n, a + n);
+    for (let q = 0; q < u8[p]; q++, r++) {
+      const len = u8[SIZES + r];
+      let x = 0, y = 0;
+      for (let m = 0; m < len; m++, k++) {
+        x += coords[2 * k];
+        y += coords[2 * k + 1];
+        const a = o + m, b = o + ((m + 1) % len);
+        pos[3 * a] = pos[3 * (a + n)] = x;
+        pos[3 * a + 1] = base;
+        pos[3 * (a + n) + 1] = top;
+        pos[3 * a + 2] = pos[3 * (a + n) + 2] = -y;
+        index[ii++] = a; index[ii++] = b; index[ii++] = b + n;
+        index[ii++] = a; index[ii++] = b + n; index[ii++] = a + n;
       }
-      o += ring.length;
+      o += len;
     }
-    for (const [a, b, c] of THREE.ShapeUtils.triangulateShape(rings[0], rings.slice(1))) {
-      const A = flat[a], B = flat[b], C = flat[c];
-      const ccw = (B.x - A.x) * (C.y - A.y) - (B.y - A.y) * (C.x - A.x) > 0;
-      index.push(v + n + a, v + n + (ccw ? b : c), v + n + (ccw ? c : b));
-    }
+    for (let q = 0; q < 3 * u8[ROOFS + p]; q++) index[ii++] = v + n + u8[t++];
     v += 2 * n;
   }
   const g = new THREE.BufferGeometry();
-  g.setAttribute('position', new THREE.BufferAttribute(pos, 3));
-  g.setIndex(new THREE.BufferAttribute(Uint32Array.from(index), 1));
-  return g;
+  g.setAttribute('position', new THREE.BufferAttribute(pos, 3).onUpload(releaseArray));
+  g.setIndex(new THREE.BufferAttribute(index, 1).onUpload(releaseArray));
+  g.computeBoundingSphere(); // for culling, before the arrays are released
+  const mesh = new THREE.Mesh(g, buildingMaterial);
+  mesh.position.set(x0 / 10, 0, -y0 / 10);
+  mesh.scale.setScalar(0.1);
+  return mesh;
 }
 
 // Height of the terrain mesh itself (its triangles, not the smoothed lookup of ground()),
@@ -186,6 +200,8 @@ function buildTerrain(t) {
   g.setAttribute('position', new THREE.BufferAttribute(pos, 3));
   g.setIndex(index);
   g.computeVertexNormals();
+  g.computeBoundingSphere();
+  for (const a of [g.index, ...Object.values(g.attributes)]) a.onUpload(releaseArray);
   return g;
 }
 
@@ -951,37 +967,30 @@ async function updateCloud() {
 // ---------- start ----------
 
 async function main() {
-  const load = (name) => fetch(`data/${name}.json`).then((r) => { if (!r.ok) throw new Error(name); return r.json(); });
-  let treeData;
-  let mapData;
-  [geo, terrain, cafes, treeData, mapData] = await Promise.all([
-    load('buildings'), load('terrain'), load('cafes'), load('trees').catch(() => null), load('map').catch(() => null),
+  const get = (name) => fetch(`data/${name}`).then((r) => { if (!r.ok) throw new Error(name); return r; });
+  const load = (name) => get(`${name}.json`).then((r) => r.json());
+  const loadBinary = (name) => get(`${name}.bin`).then((r) => r.arrayBuffer());
+  let buildingData, terrainData, treeData, mapData;
+  [buildingData, terrainData, cafes, treeData, mapData] = await Promise.all([
+    loadBinary('buildings'), loadBinary('terrain'), load('cafes'), load('trees').catch(() => null), load('map').catch(() => null),
   ]);
 
-  bounds = { minX: Infinity, maxX: -Infinity, minY: Infinity, maxY: -Infinity };
-  for (const p of geo.parts.slice(0, geo.core)) {
-    bounds.minX = Math.min(bounds.minX, p[2][0] / 10); bounds.maxX = Math.max(bounds.maxX, p[2][0] / 10);
-    bounds.minY = Math.min(bounds.minY, p[2][1] / 10); bounds.maxY = Math.max(bounds.maxY, p[2][1] / 10);
-  }
-
-  const cells = new Map();
-  for (const p of geo.parts) {
-    const key = Math.floor(p[2][0] / 10 / CHUNK) + ',' + Math.floor(p[2][1] / 10 / CHUNK);
-    if (!cells.has(key)) cells.set(key, []);
-    cells.get(key).push(p);
-  }
-  const material = new THREE.MeshLambertMaterial({ color: COLORS.building, flatShading: true, shadowSide: THREE.FrontSide });
-  chunks = [...cells.values()].map((parts) => {
-    const mesh = new THREE.Mesh(buildBuildings(parts), material);
+  const b = readBinary(buildingData, 'ZGB1');
+  geo = { lat0: b.header.lat0, lon0: b.header.lon0 };
+  const [minX, minY, maxX, maxY] = b.header.bounds;
+  bounds = { minX, minY, maxX, maxY };
+  chunks = b.header.chunks.map((chunk) => {
+    const mesh = buildBuildings(buildingData, chunk);
     mesh.castShadow = mesh.receiveShadow = true;
-    mesh.geometry.computeBoundingBox();
     scene.add(mesh);
-    return { mesh, box: mesh.geometry.boundingBox };
+    return mesh;
   });
+
+  const t = readBinary(terrainData, 'ZGT1');
+  terrain = { ...t.header, h: new Int16Array(terrainData, t.start, t.header.nx * t.header.ny) };
   const land = new THREE.Mesh(buildTerrain(terrain), new THREE.MeshLambertMaterial({ color: COLORS.ground }));
   land.receiveShadow = true;
   scene.add(land);
-  geo.parts = null;
 
   if (treeData) trees = buildTrees(treeData);
   if (mapData) buildMap(mapData);

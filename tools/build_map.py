@@ -6,10 +6,9 @@ Usage:  python3 tools/build_map.py
 """
 import json
 import math
-import os
 from collections import Counter
 
-from common import DATA, overpass, to_local, to_lonlat, write_json
+from common import load_terrain, overpass, to_local, to_lonlat, write_json
 
 SIMPLIFY = 0.5  # m, Douglas-Peucker tolerance
 
@@ -151,8 +150,7 @@ def dm(ring):
 
 
 def main():
-    with open(os.path.join(DATA, "terrain.json"), encoding="utf-8") as f:
-        t = json.load(f)
+    t = load_terrain()
     box = (t["x0"], t["y0"], t["x0"] + (t["nx"] - 1) * t["cell"], t["y0"] + (t["ny"] - 1) * t["cell"])
     w, s = to_lonlat(box[0], box[1])
     e, n = to_lonlat(box[2], box[3])

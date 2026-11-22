@@ -1,10 +1,14 @@
 """Shared helpers for the data tools: local projection, cached downloads, terrain lookup, building index."""
+import functools
 import json
 import math
 import os
+import struct
+import sys
 import time
 import urllib.parse
 import urllib.request
+from array import array
 from collections import defaultdict
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -82,7 +86,7 @@ def write_json(name, obj):
 
 
 class Terrain:
-    """Regular grid of ground elevations with bilinear lookup (same layout as data/terrain.json)."""
+    """Regular grid of ground elevations with bilinear lookup (same layout as data/terrain.bin)."""
 
     def __init__(self, x0, y0, cell, nx, ny, h):
         self.x0, self.y0, self.cell, self.nx, self.ny, self.h = x0, y0, cell, nx, ny, h
@@ -98,20 +102,151 @@ class Terrain:
         return a * (1 - ty) + b * ty
 
 
-def load_buildings():
-    with open(os.path.join(DATA, "buildings.json"), encoding="utf-8") as f:
-        b = json.load(f)
-    parts = []
-    for p in b["parts"]:
-        parts.append([[(r[i] / 10, r[i + 1] / 10) for i in range(0, len(r), 2)] for r in p[2:]])
-    return parts, b["core"]
+# ---------- data/buildings.bin and data/terrain.bin ----------
+#
+# Both files: 4-byte tag, Uint32 header length, a JSON header padded with spaces so the data after it starts at a
+# multiple of 4 bytes, then little-endian arrays.
+#
+# buildings.bin ("ZGB1"): header {lat0, lon0, z0, bounds: [min x, min y, max x, max y] in m, chunk: size in m,
+# chunks: [[x0, y0, parts, rings, vertices, roof triangles, byte offset], ...]} with x0, y0 the chunk origin in
+# decimetres. Every chunk is one block:
+#   Int16  heights[2 × parts]      base and top of every part, decimetres above z0
+#   Int16  coords[2 × vertices]    x, y in decimetres: a ring's first vertex relative to the chunk origin,
+#                                  the others relative to the previous vertex
+#   Uint8  rings[parts]            rings per part (outer ring first, then holes)
+#   Uint8  sizes[rings]            vertices per ring
+#   Uint8  roofs[parts]            roof triangles per part
+#   Uint8  roof[3 × triangles]     roof corners as vertex indices within the part, counter-clockwise from above
+#   zero padding to a multiple of 4 bytes
+# terrain.bin ("ZGT1"): header {x0, y0, cell, nx, ny, z0}, then Int16 h[nx × ny], decimetres above z0, row by row
+# from the south-west corner.
 
+BUILDING_CHUNK = 600  # m, as CHUNK in app.js
+
+
+def _pack(tag, header, blocks):
+    head = json.dumps(header, separators=(",", ":")).encode()
+    head += b" " * (-(8 + len(head)) % 4)
+    return tag + struct.pack("<I", len(head)) + head + b"".join(blocks)
+
+
+def _unpack(path, tag):
+    with open(path, "rb") as f:
+        data = f.read()
+    if data[:4] != tag:
+        raise ValueError(f"{path} is not a {tag.decode()} file")
+    (n,) = struct.unpack_from("<I", data, 4)
+    return json.loads(data[8 : 8 + n]), data, 8 + n
+
+
+def _le(arr):
+    if sys.byteorder != "little":
+        arr.byteswap()
+    return arr.tobytes()
+
+
+def write_binary(name, data):
+    os.makedirs(DATA, exist_ok=True)
+    path = os.path.join(DATA, name)
+    with open(path, "wb") as f:
+        f.write(data)
+    print(f"  wrote data/{name}: {os.path.getsize(path) / 1024:.0f} KB")
+
+
+def pack_buildings(parts, lat0, lon0, z0, triangulate):
+    """parts: [base_dm, top_dm, ring, ring, ...] with flat [x, y, ...] decimetre rings (outer ring first).
+    triangulate(rings) -> roof triangles as part-local vertex indices."""
+    size = BUILDING_CHUNK * 10
+    chunks = defaultdict(list)
+    for p in parts:
+        chunks[(p[2][0] // size, p[2][1] // size)].append(p)
+    firsts = [(p[2][0] / 10, p[2][1] / 10) for p in parts]
+    bounds = [min(x for x, _ in firsts), min(y for _, y in firsts), max(x for x, _ in firsts), max(y for _, y in firsts)]
+    table, blocks, offset = [], [], 0
+    for (ci, cj), ps in sorted(chunks.items()):
+        x0, y0 = ci * size, cj * size
+        heights, coords = array("h"), array("h")
+        rings, sizes, roofs, roof = bytearray(), bytearray(), bytearray(), bytearray()
+        for p in ps:
+            heights.extend(p[:2])
+            rings.append(len(p) - 2)
+            for r in p[2:]:
+                sizes.append(len(r) // 2)
+                px, py = x0, y0
+                for k in range(0, len(r), 2):
+                    coords.extend((r[k] - px, r[k + 1] - py))
+                    px, py = r[k], r[k + 1]
+            tris = triangulate(p[2:])
+            roofs.append(len(tris) // 3)
+            roof.extend(tris)
+        verts = len(coords) // 2
+        assert 2 * verts < 65536, "chunk too large for 16-bit indices"
+        block = _le(heights) + _le(coords) + bytes(rings + sizes + roofs + roof)
+        block += b"\0" * (-len(block) % 4)
+        table.append([x0, y0, len(ps), len(sizes), verts, len(roof) // 3, offset])
+        blocks.append(block)
+        offset += len(block)
+    header = {"lat0": lat0, "lon0": lon0, "z0": z0, "bounds": bounds, "chunk": BUILDING_CHUNK, "chunks": table}
+    # Block offsets are absolute, so they depend on the header's own length: repeat until it settles.
+    start = 0
+    while True:
+        header["chunks"] = [row[:6] + [row[6] + start] for row in table]
+        head = _pack(b"ZGB1", header, [])
+        if len(head) == start:
+            return head + b"".join(blocks)
+        start = len(head)
+
+
+@functools.lru_cache(maxsize=1)
+def _read_buildings():
+    header, data, _ = _unpack(os.path.join(DATA, "buildings.bin"), b"ZGB1")
+    parts, tops = [], []
+    for x0, y0, n_parts, n_rings, n_verts, n_tris, off in header["chunks"]:
+        heights = array("h", data[off : off + 4 * n_parts])
+        coords = array("h", data[off + 4 * n_parts : off + 4 * n_parts + 4 * n_verts])
+        if sys.byteorder != "little":
+            heights.byteswap()
+            coords.byteswap()
+        u8 = data[off + 4 * n_parts + 4 * n_verts :]
+        sizes_at, r, k = n_parts, 0, 0
+        for p in range(n_parts):
+            rings = []
+            for _ in range(u8[p]):
+                ring, x, y = [], x0, y0
+                for m in range(u8[sizes_at + r]):
+                    x, y = x + coords[2 * k], y + coords[2 * k + 1]
+                    ring.append((x / 10, y / 10))
+                    k += 1
+                rings.append(ring)
+                r += 1
+            parts.append(rings)
+            tops.append(heights[2 * p + 1] / 10)
+    return header, parts, tops
+
+
+def load_buildings():
+    """(parts, n_core): footprints as lists of rings of (x, y) in m. All parts belong to the displayed area."""
+    _, parts, _ = _read_buildings()
+    return parts, len(parts)
 
 
 def load_building_tops():
-    """Roof height of every part in load_buildings() order, in m above z0 (the datum of data/terrain.json)."""
-    with open(os.path.join(DATA, "buildings.json"), encoding="utf-8") as f:
-        return [p[1] / 10 for p in json.load(f)["parts"]]
+    """Roof height of every part in load_buildings() order, in m above z0 (the datum of the terrain)."""
+    return _read_buildings()[2]
+
+
+def pack_terrain(terrain_header, heights_dm):
+    return _pack(b"ZGT1", terrain_header, [_le(array("h", heights_dm))])
+
+
+def load_terrain():
+    """{x0, y0, cell, nx, ny, z0, h}: h in decimetres above z0, row by row from the south-west corner."""
+    header, data, start = _unpack(os.path.join(DATA, "terrain.bin"), b"ZGT1")
+    h = array("h", data[start : start + 2 * header["nx"] * header["ny"]])
+    if sys.byteorder != "little":
+        h.byteswap()
+    return {**header, "h": h.tolist()}
+
 
 def core_bbox(parts, n_core):
     """(west, south, east, north) in degrees around the displayed districts' buildings."""

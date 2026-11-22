@@ -1,5 +1,8 @@
 #!/usr/bin/env python3
-"""Build data/buildings.json and data/terrain.json from the City of Zagreb ZG3D 2022 open data.
+"""Build data/buildings.bin and data/terrain.bin from the City of Zagreb ZG3D 2022 open data.
+
+Roofs are triangulated here (tools/earcut.py), so the browser only has to copy the data to the GPU.
+The file layout is described in tools/common.py.
 
 Source: https://data.zagreb.hr (ZG3D 2022, building-part footprints with Z_Min / Z_Max).
 Usage:  python3 tools/build_buildings.py
@@ -8,7 +11,8 @@ import json
 import math
 from collections import defaultdict
 
-from common import LAT0, LON0, Terrain, fetch, to_local, write_json
+from common import LAT0, LON0, Terrain, fetch, pack_buildings, pack_terrain, to_local, write_binary
+from earcut import earcut
 
 CKAN = "https://data.zagreb.hr/api/3/action/package_show?id="
 # All 17 city districts (gradske četvrti) of Zagreb.
@@ -100,6 +104,21 @@ def parts_of(features):
             yield rings, p["Z_Min"], p["Z_Max"]
 
 
+def roof_triangles(rings):
+    """Roof triangles of a part (flat decimetre rings) as part-local vertex indices, counter-clockwise from above."""
+    coords = [v for r in rings for v in r]
+    holes, n = [], 0
+    for r in rings[:-1]:
+        n += len(r) // 2
+        holes.append(n)
+    tris = earcut(coords, holes)
+    for t in range(0, len(tris), 3):
+        a, b, c = tris[t : t + 3]
+        if (coords[2 * b] - coords[2 * a]) * (coords[2 * c + 1] - coords[2 * a + 1]) - (coords[2 * b + 1] - coords[2 * a + 1]) * (coords[2 * c] - coords[2 * a]) < 0:
+            tris[t + 1], tris[t + 2] = c, b
+    return tris
+
+
 def centroid(ring):
     return sum(p[0] for p in ring) / len(ring), sum(p[1] for p in ring) / len(ring)
 
@@ -172,7 +191,6 @@ def main():
         n = len(parts)
         parts.extend(parts_of(load_district(slug)))
         print(f"  {slug}: {len(parts) - n} parts")
-    core = parts
 
     print("Building terrain")
     terrain = build_terrain(parts)
@@ -182,8 +200,7 @@ def main():
         return round(v * 10)
 
     out, skipped = [], 0
-    n_core = 0
-    for idx, (rings, zmin, zmax) in enumerate(parts):
+    for rings, zmin, zmax in parts:
         ground = terrain.at(*centroid(rings[0]))
         if zmax < ground + 1.5:
             skipped += 1
@@ -191,18 +208,13 @@ def main():
         # Walls start below the ground so nothing floats on slopes.
         base = min(zmin, ground) - 3
         out.append([dm(base - z0), dm(zmax - z0)] + [[dm(v) for p in ring for v in p] for ring in rings])
-        if idx < len(core):
-            n_core += 1
     print(f"  {len(out)} parts kept, {skipped} below ground skipped, {sum(len(r) // 2 for p in out for r in p[2:])} vertices")
 
     # parts: [base_dm, top_dm, outer_ring, hole, ...]; rings are flat [x, y, ...] in decimetres,
-    # x = east, y = north of the origin; heights are decimetres above z0. The first `core` parts
-    # belong to the displayed districts (now all of them), the rest would be shadow casters around them.
-    write_json("buildings.json", {"lat0": LAT0, "lon0": LON0, "z0": z0, "core": n_core, "parts": out})
-    write_json(
-        "terrain.json",
-        {"x0": terrain.x0, "y0": terrain.y0, "cell": terrain.cell, "nx": terrain.nx, "ny": terrain.ny, "z0": z0, "h": [dm(v - z0) for v in terrain.h]},
-    )
+    # x = east, y = north of the origin; heights are decimetres above z0.
+    write_binary("buildings.bin", pack_buildings(out, LAT0, LON0, z0, roof_triangles))
+    header = {"x0": terrain.x0, "y0": terrain.y0, "cell": terrain.cell, "nx": terrain.nx, "ny": terrain.ny, "z0": z0}
+    write_binary("terrain.bin", pack_terrain(header, [dm(v - z0) for v in terrain.h]))
 
 
 if __name__ == "__main__":

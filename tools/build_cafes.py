@@ -15,7 +15,7 @@ import re
 import unicodedata
 from collections import Counter, defaultdict
 
-from common import CACHE, DATA, Index, Terrain, core_bbox, load_building_tops, load_buildings, overpass, to_local, to_lonlat, write_json
+from common import CACHE, Index, Terrain, core_bbox, load_building_tops, load_buildings, load_terrain, overpass, to_local, to_lonlat, write_json
 from skyline import Skylines, encode
 
 OVERTURE = os.path.join(CACHE, "overture.places.json")  # written by tools/fetch_overture.py
@@ -134,8 +134,7 @@ def main():
     parts, n_core = load_buildings()
     index = Index(parts)
     core = Index(parts[:n_core])
-    with open(os.path.join(DATA, "terrain.json"), encoding="utf-8") as f:
-        t = json.load(f)
+    t = load_terrain()
     terrain = Terrain(t["x0"], t["y0"], t["cell"], t["nx"], t["ny"], [v / 10 for v in t["h"]])
 
     stats = Counter()
