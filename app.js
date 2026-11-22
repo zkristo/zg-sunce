@@ -428,16 +428,13 @@ function showLeaves(leaf) {
 
 // ---------- markers ----------
 
-function dotTexture(fill, ring, plain) {
+function dotTexture(fill, ring) {
   const c = document.createElement('canvas');
   c.width = c.height = 64;
   const g = c.getContext('2d');
   g.beginPath();
-  g.arc(32, 32, ring ? 26 : plain ? 30 : 24, 0, 2 * Math.PI);
-  if (plain) {
-    g.fillStyle = fill;
-    g.fill();
-  } else if (ring) {
+  g.arc(32, 32, ring ? 26 : 24, 0, 2 * Math.PI);
+  if (ring) {
     g.lineWidth = 6;
     g.strokeStyle = fill;
     g.stroke();
@@ -457,10 +454,8 @@ function dotTexture(fill, ring, plain) {
   t.colorSpace = THREE.SRGBColorSpace;
   return t;
 }
-const spriteMat = (fill, ring, plain) => new THREE.SpriteMaterial({ map: dotTexture(fill, ring, plain), sizeAttenuation: false, depthTest: false, transparent: true });
+const spriteMat = (fill, ring) => new THREE.SpriteMaterial({ map: dotTexture(fill, ring), sizeAttenuation: false, depthTest: false, transparent: true });
 const mats = { sun: spriteMat('#ffb800'), tree: spriteMat('#7fa076'), shade: spriteMat('#55606e'), ring: spriteMat('#1f2933', true), user: spriteMat('#2f7cf6') };
-// Small dots without the white outline, for zoomed-out views.
-const plainMats = { sun: spriteMat('#ffb800', false, true), tree: spriteMat('#7fa076', false, true), shade: spriteMat('#55606e', false, true) };
 const markers = new THREE.Group();
 markers.visible = false;
 const ringSprite = new THREE.Sprite(mats.ring);
@@ -475,14 +470,13 @@ const pxScale = (px) => (px / innerHeight) * 2 * Math.tan((camera.fov * DEG) / 2
 const DOT_PX = [11, 12, 15]; // shade, tree, sun at the reference zoom
 const DOT_ZOOM_REF = 700; // m from camera to pivot where dots have DOT_PX
 const DOT_ZOOM_RANGE = [0.3, 1.8]; // smallest and largest factor on DOT_PX
-const DOT_PLAIN_BELOW = 8; // px: smaller dots are drawn without the white outline
 let dotZoom = 0;
 const zoomFactor = () => Math.min(DOT_ZOOM_RANGE[1], Math.max(DOT_ZOOM_RANGE[0], Math.sqrt(DOT_ZOOM_REF / camera.position.distanceTo(controls.target))));
 function styleMarkers() {
   dotZoom = zoomFactor();
   for (const c of cafes) {
     const px = DOT_PX[c.state] * dotZoom;
-    c.sprite.material = (px < DOT_PLAIN_BELOW ? plainMats : mats)[STATE_NAME[c.state]];
+    c.sprite.material = mats[STATE_NAME[c.state]];
     c.sprite.renderOrder = 1 + c.state;
     c.sprite.scale.setScalar(pxScale(px));
   }
