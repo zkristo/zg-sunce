@@ -24,18 +24,22 @@ const TREE_REACH = 250; // m, how far towards the sun a tree can still shade a t
 const TREE_MAX_DIST = 2000; // m, trees are not drawn when the camera is further away
 const DETAIL_MAX_DIST = 4000; // m, tram tracks and streams are not drawn when the camera is further away
 // Map overlays drawn on the ground: colour, lift above the terrain (m), polygon offset (draw order).
-const OVERLAY = {
+const OVERLAY = { // colour, lift above the terrain (m), polygon offset (more negative = drawn on top)
   water: [0xa9bccb, 0.25, -2],
   square: [0xd6d9dd, 0.3, -3],
+  path: [0xd2d5d9, 0.32, -3.5],
   road: [0xc4c8cd, 0.35, -4],
   stream: [0xa9bccb, 0.4, -5],
   tram: [0xa2a7ad, 0.45, -6],
   rail: [0x8d939b, 0.5, -7],
 };
-const LINE_OVERLAY = { rail: 'rail', tram: 'tram', stream: 'stream' }; // all other line classes are roads
+const LINE_OVERLAY = { rail: 'rail', tram: 'tram', stream: 'stream', path: 'path' }; // all other line classes are roads
+const AREA_OVERLAY = ['water', 'square']; // area kinds in map.json
+// Parks and woods colour the ground itself (data/landcover.bin, painted by tools/build_map.py).
+const LAND_COLORS = { green: 0xd5ddcf, wood: 0xc6d1bf };
 const RIBBON_SAMPLE = 5; // m, ribbons test the terrain this often ...
 const RIBBON_TOLERANCE = 0.1; // m, ... and keep a vertex where leaving it out would cut more than this
-const AREA_STEP = { water: 60, square: 30 }; // m, longest triangle edge in water and square fills
+const AREA_STEP = { water: 60, square: 30 }; // m, longest triangle edge in area fills
 const TYPE_LABEL = { cafe: 'Kafić', bar: 'Bar', pub: 'Pub' };
 const HEMI_INTENSITY = 0.9;
 // Sun strength is raised as it gets lower so sunlit ground stays about equally bright all day.
@@ -194,11 +198,38 @@ function terrainAt(x, y) {
   return (tx >= ty ? a + (b - a) * tx + (d - b) * ty : a + (d - c) * tx + (c - a) * ty) / 10;
 }
 
+// Parks and woods: the ground shader looks up the landcover grid (0 ground, 128 park, 255 wood; blended between
+// cells) and tints itself, so they cost no triangles.
+function paintLand(material, buf) {
+  const { header: h, start } = readBinary(buf, 'ZGL1');
+  const tex = new THREE.DataTexture(new Uint8Array(buf, start, h.nx * h.ny), h.nx, h.ny, THREE.RedFormat, THREE.UnsignedByteType);
+  tex.unpackAlignment = 1;
+  tex.magFilter = THREE.LinearFilter;
+  tex.minFilter = THREE.LinearMipmapLinearFilter;
+  tex.generateMipmaps = true;
+  tex.needsUpdate = true;
+  material.onBeforeCompile = (shader) => {
+    shader.uniforms.landcover = { value: tex };
+    shader.uniforms.landBox = { value: new THREE.Vector4(h.x0, h.y0, h.nx * h.cell, h.ny * h.cell) };
+    shader.uniforms.landGreen = { value: new THREE.Color(LAND_COLORS.green) };
+    shader.uniforms.landWood = { value: new THREE.Color(LAND_COLORS.wood) };
+    shader.vertexShader = shader.vertexShader
+      .replace('#include <common>', '#include <common>\nuniform vec4 landBox;\nvarying vec2 vLand;')
+      .replace('#include <begin_vertex>', '#include <begin_vertex>\nvLand = vec2((position.x - landBox.x) / landBox.z, (-position.z - landBox.y) / landBox.w);');
+    shader.fragmentShader = shader.fragmentShader
+      .replace('#include <common>', '#include <common>\nuniform sampler2D landcover;\nuniform vec3 landGreen;\nuniform vec3 landWood;\nvarying vec2 vLand;')
+      .replace('#include <color_fragment>', `#include <color_fragment>
+        float land = texture2D(landcover, vLand).r;
+        diffuseColor.rgb = land < 0.5 ? mix(diffuseColor.rgb, landGreen, land * 2.0) : mix(landGreen, landWood, land * 2.0 - 1.0);`);
+  };
+}
+
 // The ground in square tiles, so the tiles off screen are skipped like building chunks. Normals come from the
 // whole height grid (not tile by tile), so the shading has no seams at tile edges.
-function buildTerrain(t) {
+function buildTerrain(t, land) {
   const group = new THREE.Group();
   const material = new THREE.MeshLambertMaterial({ color: COLORS.ground });
+  if (land) paintLand(material, land);
   const h = (i, j) => t.h[Math.min(Math.max(j, 0), t.ny - 1) * t.nx + Math.min(Math.max(i, 0), t.nx - 1)] / 10;
   for (let j0 = 0; j0 < t.ny - 1; j0 += TERRAIN_TILE) {
     for (let i0 = 0; i0 < t.nx - 1; i0 += TERRAIN_TILE) {
@@ -332,6 +363,18 @@ function addRibbon(out, xy, half, lift, bridge) {
   }
 }
 
+// Normal of the ground at (x, y), as the terrain tiles shade it (from the whole height grid), so overlays are lit
+// exactly like the ground under them instead of showing every triangle.
+function terrainNormal(x, y) {
+  const t = terrain, c = t.cell;
+  const fx = Math.min(Math.max((x - t.x0) / c, 0), t.nx - 1), fy = Math.min(Math.max((y - t.y0) / c, 0), t.ny - 1);
+  const i = Math.round(fx), j = Math.round(fy);
+  const h = (a, b) => t.h[Math.min(Math.max(b, 0), t.ny - 1) * t.nx + Math.min(Math.max(a, 0), t.nx - 1)] / 10;
+  const ex = (h(i + 1, j) - h(i - 1, j)) / (2 * c), ny = (h(i, j + 1) - h(i, j - 1)) / (2 * c);
+  const len = Math.hypot(ex, 1, ny);
+  return [-ex / len, 1 / len, ny / len];
+}
+
 function insideRing(x, y, ring) {
   let c = false;
   for (let i = 0, j = ring.length - 2; i < ring.length; j = i, i += 2) {
@@ -389,7 +432,7 @@ function buildMap(data) {
     return buckets.get(key);
   };
   for (const [kind, ...rings] of data.areas) {
-    const name = kind === 0 ? 'water' : 'square';
+    const name = AREA_OVERLAY[kind];
     const r = rings.map((ring) => ring.map((v) => v / 10));
     addArea(bucket(name, r[0][0], r[0][1]), r, OVERLAY[name][1], AREA_STEP[name]);
   }
@@ -403,7 +446,10 @@ function buildMap(data) {
     const kind = key.split('|')[0];
     const [color, , units] = OVERLAY[kind];
     const g = new THREE.BufferGeometry();
-    g.setAttribute('position', new THREE.BufferAttribute(new Float32Array(pos), 3));
+    const positions = new Float32Array(pos), normals = new Float32Array(pos.length);
+    for (let i = 0; i < pos.length; i += 3) normals.set(terrainNormal(pos[i], -pos[i + 2]), i);
+    g.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+    g.setAttribute('normal', new THREE.BufferAttribute(normals, 3));
     const mesh = new THREE.Mesh(g, overlayMaterial(color, units));
     mesh.receiveShadow = true;
     g.computeBoundingSphere();
@@ -416,7 +462,7 @@ const overlayMats = new Map();
 function overlayMaterial(color, units) {
   if (!overlayMats.has(color + ':' + units)) {
     overlayMats.set(color + ':' + units, new THREE.MeshLambertMaterial({
-      color, flatShading: true, side: THREE.DoubleSide, polygonOffset: true, polygonOffsetFactor: -1, polygonOffsetUnits: units,
+      color, side: THREE.DoubleSide, polygonOffset: true, polygonOffsetFactor: -1, polygonOffsetUnits: units,
     }));
   }
   return overlayMats.get(color + ':' + units);
@@ -868,6 +914,7 @@ function frame() {
   const camDist = camera.position.distanceTo(controls.target);
   treeGroup.visible = camDist < TREE_MAX_DIST;
   overlayGroups.tram.visible = overlayGroups.stream.visible = camDist < DETAIL_MAX_DIST;
+  overlayGroups.path.visible = camDist < TREE_MAX_DIST;
   renderer.render(scene, camera);
   $('needle').style.transform = `rotate(${controls.getAzimuthalAngle()}rad)`;
 }
@@ -1205,9 +1252,10 @@ async function main() {
   const get = (name) => fetch(`data/${name}`).then((r) => { if (!r.ok) throw new Error(name); return r; });
   const load = (name) => get(`${name}.json`).then((r) => r.json());
   const loadBinary = (name) => get(`${name}.bin`).then((r) => r.arrayBuffer());
-  let buildingData, terrainData, treeData, mapData;
-  [buildingData, terrainData, cafes, treeData, mapData] = await Promise.all([
+  let buildingData, terrainData, treeData, mapData, landData;
+  [buildingData, terrainData, cafes, treeData, mapData, landData] = await Promise.all([
     loadBinary('buildings'), loadBinary('terrain'), load('cafes'), load('trees').catch(() => null), load('map').catch(() => null),
+    loadBinary('landcover').catch(() => null),
   ]);
 
   const b = readBinary(buildingData, 'ZGB1');
@@ -1225,7 +1273,7 @@ async function main() {
 
   const t = readBinary(terrainData, 'ZGT1');
   terrain = { ...t.header, h: new Int16Array(terrainData, t.start, t.header.nx * t.header.ny) };
-  scene.add(buildTerrain(terrain));
+  scene.add(buildTerrain(terrain, landData));
 
   if (treeData) trees = buildTrees(treeData);
   if (mapData) buildMap(mapData);

@@ -1,5 +1,11 @@
 #!/usr/bin/env python3
-"""Build data/map.json (water, roads, railways) from OpenStreetMap. Run after build_buildings.py.
+"""Build data/map.json (water, roads, footpaths, railways) and data/landcover.bin (parks and woods) from OpenStreetMap.
+Run after build_buildings.py.
+
+Parks and woods are not drawn as shapes (woods alone would be millions of triangles over the hills): they are painted
+into a 10 m grid that the ground shader uses for its colour. landcover.bin: "ZGL1", Uint32 header length, JSON header
+{x0, y0, cell, nx, ny} padded to 4 bytes, then Uint8 per cell row by row from the south-west corner:
+0 = plain ground, 128 = park / grass, 255 = wood (the shader blends between neighbouring cells).
 
 Everything is drawn flat on the terrain, so only outlines and centrelines are stored.
 Usage:  python3 tools/build_map.py
@@ -8,22 +14,69 @@ import json
 import math
 from collections import Counter
 
-from common import load_terrain, overpass, to_local, to_lonlat, write_json
+from common import _pack, load_terrain, overpass, to_local, to_lonlat, write_binary, write_json
 
 SIMPLIFY = 0.5  # m, Douglas-Peucker tolerance
 
 # Line classes: (name, drawn width in m). Order is the order in data/map.json "classes".
 CLASSES = [
     ("motorway", 16), ("trunk", 14), ("primary", 12), ("secondary", 10), ("tertiary", 8),
-    ("link", 7), ("street", 6), ("pedestrian", 5), ("rail", 3), ("tram", 2.4), ("stream", 3),
+    ("link", 7), ("street", 6), ("pedestrian", 5), ("rail", 3), ("tram", 2.4), ("stream", 3), ("path", 2),
 ]
 CLASS_ID = {name: i for i, (name, _) in enumerate(CLASSES)}
 HIGHWAY = {
     "motorway": "motorway", "trunk": "trunk", "primary": "primary", "secondary": "secondary",
     "tertiary": "tertiary", "unclassified": "street", "residential": "street", "living_street": "street",
-    "pedestrian": "pedestrian",
+    "pedestrian": "pedestrian", "footway": "path", "path": "path", "cycleway": "path", "steps": "path",
+    "bridleway": "path",
 }
-AREA_WATER, AREA_PEDESTRIAN = 0, 1
+AREA_WATER, AREA_PEDESTRIAN, AREA_GREEN, AREA_WOOD = 0, 1, 2, 3
+AREA_NAME = {AREA_WATER: "water area", AREA_PEDESTRIAN: "pedestrian area", AREA_GREEN: "green area", AREA_WOOD: "wood"}
+GREEN_SIMPLIFY = 1.5  # m: park and wood outlines need less detail than water and squares
+LAND_CELL = 10  # m, landcover grid (≤ 4096 cells a side, the largest texture every phone takes)
+LAND_VALUE = {AREA_GREEN: 128, AREA_WOOD: 255}
+
+
+def rasterize(shapes, box):
+    """Paint [(value, [ring, ...]), ...] (rings in m; holes by even-odd) into a Uint8 grid of LAND_CELL cells."""
+    import numpy as np
+
+    nx, ny = math.ceil((box[2] - box[0]) / LAND_CELL), math.ceil((box[3] - box[1]) / LAND_CELL)
+    if max(nx, ny) > 4096:
+        raise ValueError("landcover grid larger than 4096 cells; raise LAND_CELL")
+    grid = np.zeros((ny, nx), np.uint8)
+    for value, rings in shapes:
+        a = np.concatenate([np.asarray(r, dtype=np.float64) for r in rings])
+        b = np.concatenate([np.roll(np.asarray(r, dtype=np.float64), -1, axis=0) for r in rings])
+        j0 = max(0, int((a[:, 1].min() - box[1]) // LAND_CELL))
+        j1 = min(ny - 1, int((a[:, 1].max() - box[1]) // LAND_CELL))
+        for j in range(j0, j1 + 1):
+            yc = box[1] + (j + 0.5) * LAND_CELL
+            cross = (a[:, 1] <= yc) != (b[:, 1] <= yc)
+            if not cross.any():
+                continue
+            xa, ya, xb, yb = a[cross, 0], a[cross, 1], b[cross, 0], b[cross, 1]
+            xs = np.sort(xa + (yc - ya) * (xb - xa) / (yb - ya))
+            for left, right in zip(xs[::2], xs[1::2]):
+                i0 = max(0, math.ceil((left - box[0]) / LAND_CELL - 0.5))
+                i1 = min(nx - 1, math.floor((right - box[0]) / LAND_CELL - 0.5))
+                if i1 >= i0:
+                    grid[j, i0 : i1 + 1] = value
+    return grid
+
+
+def area_kind(tags):
+    """Kind of a closed way or multipolygon, or None if it is not an area drawn on the map."""
+    if tags.get("natural") == "water":
+        return AREA_WATER
+    if tags.get("highway") in ("pedestrian", "footway") and tags.get("area") == "yes":
+        return AREA_PEDESTRIAN
+    if tags.get("landuse") == "forest" or tags.get("natural") == "wood":
+        return AREA_WOOD
+    if tags.get("leisure") in ("park", "garden", "pitch") or tags.get("landuse") in (
+        "grass", "recreation_ground", "meadow", "village_green", "cemetery"):
+        return AREA_GREEN
+    return None
 
 
 def line_class(tags):
@@ -133,7 +186,7 @@ def stitch(ways):
     return rings
 
 
-def project_ring(coords, box):
+def project_ring(coords, box, tol=SIMPLIFY):
     ring = [to_local(lon, lat) for lon, lat in coords]
     if ring and ring[0] == ring[-1]:
         ring.pop()
@@ -141,7 +194,7 @@ def project_ring(coords, box):
     if len(ring) >= 4:
         # Split the loop at the point farthest from the start, so each half has a proper baseline.
         k = max(range(len(ring)), key=lambda i: math.dist(ring[0], ring[i]))
-        ring = simplify(ring[: k + 1])[:-1] + simplify(ring[k:] + ring[:1])[:-1]
+        ring = simplify(ring[: k + 1], tol)[:-1] + simplify(ring[k:] + ring[:1], tol)[:-1]
     return ring if len(ring) >= 3 and abs(area(ring)) >= 20 else None
 
 
@@ -160,41 +213,58 @@ def main():
   way["highway"~"^(motorway|trunk|primary|secondary|tertiary)(_link)?$|^(unclassified|residential|living_street|pedestrian)$"]({bb});
   way["railway"~"^(rail|tram)$"]({bb});
   way["waterway"~"^(stream|canal)$"]({bb});
+  way["highway"~"^(footway|path|cycleway|steps|bridleway)$"]({bb});
   way["natural"="water"]({bb});
   relation["natural"="water"]({bb});
+  way["leisure"~"^(park|garden|pitch)$"]({bb});
+  relation["leisure"~"^(park|garden|pitch)$"]({bb});
+  way["landuse"~"^(grass|recreation_ground|meadow|village_green|cemetery|forest)$"]({bb});
+  relation["landuse"~"^(grass|recreation_ground|meadow|village_green|cemetery|forest)$"]({bb});
+  way["natural"="wood"]({bb});
+  relation["natural"="wood"]({bb});
 );
 out geom;"""
     with open(overpass(query, "map.overpass.json", timeout=400), encoding="utf-8") as f:
         elements = json.load(f)["elements"]
 
-    lines, areas, stats = [], [], Counter()
+    lines, areas, land, stats = [], [], [], Counter()
     for el in elements:
         tags = el.get("tags", {})
         if el["type"] == "relation":
-            if tags.get("type") != "multipolygon":
+            kind = area_kind(tags)
+            if tags.get("type") != "multipolygon" or kind is None:
                 continue
+            tol = SIMPLIFY if kind in (AREA_WATER, AREA_PEDESTRIAN) else GREEN_SIMPLIFY
             outer = stitch([[(p["lon"], p["lat"]) for p in m.get("geometry", [])] for m in el["members"] if m.get("role") == "outer"])
             inner = stitch([[(p["lon"], p["lat"]) for p in m.get("geometry", [])] for m in el["members"] if m.get("role") == "inner"])
-            holes = [h for h in (project_ring(r, box) for r in inner) if h]
+            holes = [h for h in (project_ring(r, box, tol) for r in inner) if h]
             for r in outer:
-                ring = project_ring(r, box)
+                ring = project_ring(r, box, tol)
                 if ring:
-                    # Holes are attached to every outer ring; the renderer ignores holes outside its outline.
-                    areas.append([AREA_WATER, dm(ring)] + [dm(h) for h in holes])
-                    stats["water area"] += 1
+                    if kind in LAND_VALUE:
+                        land.append((LAND_VALUE[kind], [ring] + holes))
+                    else:
+                        # Holes are attached to every outer ring; the renderer ignores holes outside its outline.
+                        areas.append([kind, dm(ring)] + [dm(h) for h in holes])
+                    stats[AREA_NAME[kind]] += 1
             continue
         coords = [(p["lon"], p["lat"]) for p in el.get("geometry", [])]
         if len(coords) < 2 or tags.get("tunnel") in ("yes", "culvert", "building_passage") or tags.get("layer", "0").startswith("-"):
             stats["skipped (tunnel / underground)"] += 1
             continue
-        if tags.get("natural") == "water" or (tags.get("highway") == "pedestrian" and tags.get("area") == "yes"):
+        kind = area_kind(tags)
+        if kind is not None:
             if coords[0] != coords[-1]:
                 continue
-            ring = project_ring(coords, box)
+            ring = project_ring(coords, box, SIMPLIFY if kind in (AREA_WATER, AREA_PEDESTRIAN) else GREEN_SIMPLIFY)
             if ring:
-                kind = AREA_WATER if tags.get("natural") == "water" else AREA_PEDESTRIAN
-                areas.append([kind, dm(ring)])
-                stats["water area" if kind == AREA_WATER else "pedestrian area"] += 1
+                if kind in LAND_VALUE:
+                    land.append((LAND_VALUE[kind], [ring]))
+                else:
+                    areas.append([kind, dm(ring)])
+                stats[AREA_NAME[kind]] += 1
+            continue
+        if tags.get("indoor") not in (None, "no"):
             continue
         cls = line_class(tags)
         if cls is None:
@@ -211,6 +281,10 @@ out geom;"""
     print("  " + ", ".join(f"{k}: {v}" for k, v in sorted(stats.items())))
     # classes: [name, width_dm]; lines: [class, bridge, x, y, x, y, ...]; areas: [kind, outer, hole, ...]
     # (kind 0 = water, 1 = pedestrian square). Coordinates in decimetres, x = east, y = north.
+    # Woods first, parks on top of them.
+    grid = rasterize(sorted(land, key=lambda s: -s[0]), box)
+    header = {"x0": box[0], "y0": box[1], "cell": LAND_CELL, "nx": grid.shape[1], "ny": grid.shape[0]}
+    write_binary("landcover.bin", _pack(b"ZGL1", header, [grid.tobytes()]))
     write_json("map.json", {"classes": [[name, round(width * 10)] for name, width in CLASSES], "lines": lines, "areas": areas})
 
 
