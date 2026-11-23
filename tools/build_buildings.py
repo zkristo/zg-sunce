@@ -11,7 +11,7 @@ import json
 import math
 from collections import defaultdict
 
-from common import LAT0, LON0, Terrain, fetch, pack_buildings, pack_terrain, to_local, write_binary
+from common import LAT0, LON0, Terrain, feature_anchor, fetch, pack_buildings, pack_terrain, to_local, write_binary
 from earcut import earcut
 
 CKAN = "https://data.zagreb.hr/api/3/action/package_show?id="
@@ -76,7 +76,7 @@ def area(pts):
 
 
 def parts_of(features):
-    """Yield (rings, z_min, z_max): outer ring first (CCW), then holes (CW)."""
+    """Yield (rings, z_min, z_max, anchor): outer ring first (CCW), then holes (CW); anchor decides the chunk."""
     for f in features:
         g, p = f.get("geometry"), f["properties"]
         if not g or p.get("Z_Min") is None or p.get("Z_Max") is None:
@@ -84,6 +84,7 @@ def parts_of(features):
         if p["Z_Max"] - p["Z_Min"] < MIN_HEIGHT:
             continue
         polys = g["coordinates"] if g["type"] == "MultiPolygon" else [g["coordinates"]]
+        anchor = feature_anchor(g)
         for poly in polys:
             outer = simplify(poly[0])
             if len(outer) < 3 or abs(area(outer)) < MIN_AREA:
@@ -101,7 +102,7 @@ def parts_of(features):
                     if area(h) > 0:
                         h.reverse()
                     rings.append(h)
-            yield rings, p["Z_Min"], p["Z_Max"]
+            yield rings, p["Z_Min"], p["Z_Max"], anchor
 
 
 def roof_triangles(rings):
@@ -193,14 +194,14 @@ def main():
         print(f"  {slug}: {len(parts) - n} parts")
 
     print("Building terrain")
-    terrain = build_terrain(parts)
+    terrain = build_terrain([p[:3] for p in parts])
     z0 = math.floor(min(terrain.h))
 
     def dm(v):
         return round(v * 10)
 
-    out, skipped = [], 0
-    for rings, zmin, zmax in parts:
+    out, anchors, skipped = [], [], 0
+    for rings, zmin, zmax, anchor in parts:
         ground = terrain.at(*centroid(rings[0]))
         if zmax < ground + 1.5:
             skipped += 1
@@ -208,11 +209,12 @@ def main():
         # Walls start below the ground so nothing floats on slopes.
         base = min(zmin, ground) - 3
         out.append([dm(base - z0), dm(zmax - z0)] + [[dm(v) for p in ring for v in p] for ring in rings])
+        anchors.append(anchor)
     print(f"  {len(out)} parts kept, {skipped} below ground skipped, {sum(len(r) // 2 for p in out for r in p[2:])} vertices")
 
     # parts: [base_dm, top_dm, outer_ring, hole, ...]; rings are flat [x, y, ...] in decimetres,
     # x = east, y = north of the origin; heights are decimetres above z0.
-    write_binary("buildings.bin", pack_buildings(out, LAT0, LON0, z0, roof_triangles))
+    write_binary("buildings.bin", pack_buildings(out, anchors, LAT0, LON0, z0, roof_triangles))
     header = {"x0": terrain.x0, "y0": terrain.y0, "cell": terrain.cell, "nx": terrain.nx, "ny": terrain.ny, "z0": z0}
     write_binary("terrain.bin", pack_terrain(header, [dm(v - z0) for v in terrain.h]))
 

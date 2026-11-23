@@ -20,6 +20,7 @@ Nema build koraka: `index.html` + `app.js` + `style.css`, biblioteke (three.js, 
 | Datoteka | Izvor | Alat |
 | --- | --- | --- |
 | `data/buildings.bin`, `data/terrain.bin` | [ZG3D 2022, Grad Zagreb](https://data.zagreb.hr/dataset/?q=zg3d) (Otvorena dozvola); binarni zapis s krovovima već trianguliranima (opis u `tools/common.py`) | `python3 tools/build_buildings.py` |
+| detaljne 3D zgrade (pravi krovovi), zaseban repozitorij [zg-sunce-tiles](https://github.com/zkristo/zg-sunce-tiles) | ZG3D 2022 LoD 2.2 (FGDB multipatch), Grad Zagreb (Otvorena dozvola) | `python3 tools/build_tiles.py` u kopiju repozitorija `../zg-sunce-tiles`, zatim jedan novi commit (`git commit --amend`) i `git push --force` |
 | `data/cafes.json` | © [OpenStreetMap](https://www.openstreetmap.org/copyright) doprinositelji (ODbL), Overpass API; kafići kojih nema u OSM-u iz [Overture Maps](https://overturemaps.org/) (CDLA-Permissive-2.0, samo pouzdanost ≥ 0,8) | `python3 tools/fetch_overture.py` (treba `pip install duckdb`), zatim `python3 tools/build_cafes.py` |
 | `data/trees.json` | Katastar zelenila Grada Zagreba ([javni ArcGIS sloj](https://services8.arcgis.com/Usi0jGQwMmBUpFjr/arcgis/rest/services/stablo_SpatialJoin/FeatureServer), bez navedene licence) | `python3 tools/build_trees.py` |
 | `data/map.json` | © [OpenStreetMap](https://www.openstreetmap.org/copyright) doprinositelji (ODbL): vode, ulice, pruge i tramvajske pruge | `python3 tools/build_map.py` |

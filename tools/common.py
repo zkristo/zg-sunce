@@ -108,8 +108,10 @@ class Terrain:
 # multiple of 4 bytes, then little-endian arrays.
 #
 # buildings.bin ("ZGB1"): header {lat0, lon0, z0, bounds: [min x, min y, max x, max y] in m, chunk: size in m,
-# chunks: [[x0, y0, parts, rings, vertices, roof triangles, byte offset], ...]} with x0, y0 the chunk origin in
+# chunks: [[x0, y0, parts, rings, vertices, roof triangles, byte offset, big parts], ...]} with x0, y0 the chunk origin in
 # decimetres. Every chunk is one block:
+# Parts are sorted big first; the chunk row's 8th value counts the big ones (see BIG_PART), which a far view can
+# draw alone.
 #   Int16  heights[2 × parts]      base and top of every part, decimetres above z0
 #   Int16  coords[2 × vertices]    x, y in decimetres: a ring's first vertex relative to the chunk origin,
 #                                  the others relative to the previous vertex
@@ -122,6 +124,28 @@ class Terrain:
 # from the south-west corner.
 
 BUILDING_CHUNK = 600  # m, as CHUNK in app.js
+BIG_PART = (8, 150)  # m tall above ground, or m² footprint: parts kept in the far level of detail
+
+
+def feature_anchor(geometry):
+    """Decimetre (x, y) of the first point of a ZG3D GeoJSON feature's first outline. All parts of a building go to
+    the chunk of this point, so the block version and the detailed 3D version (tools/build_tiles.py, matched by
+    OBJECTID) of a building always land in the same chunk."""
+    first = geometry["coordinates"][0][0][0] if geometry["type"] == "MultiPolygon" else geometry["coordinates"][0][0]
+    x, y = to_local(first[0], first[1])
+    return round(x * 10), round(y * 10)
+
+
+def chunk_of(anchor):
+    size = BUILDING_CHUNK * 10
+    return anchor[0] // size, anchor[1] // size
+
+
+def _big(p):
+    """Part tall or large enough for the far level of detail (base includes a 3 m skirt below the ground)."""
+    r = p[2]
+    footprint = abs(sum(r[i - 2] * r[i + 1] - r[i] * r[i - 1] for i in range(0, len(r), 2))) / 200  # m²
+    return p[1] - p[0] - 30 >= BIG_PART[0] * 10 or footprint >= BIG_PART[1]
 
 
 def _pack(tag, header, blocks):
@@ -153,18 +177,20 @@ def write_binary(name, data):
     print(f"  wrote data/{name}: {os.path.getsize(path) / 1024:.0f} KB")
 
 
-def pack_buildings(parts, lat0, lon0, z0, triangulate):
-    """parts: [base_dm, top_dm, ring, ring, ...] with flat [x, y, ...] decimetre rings (outer ring first).
-    triangulate(rings) -> roof triangles as part-local vertex indices."""
+def pack_buildings(parts, anchors, lat0, lon0, z0, triangulate):
+    """parts: [base_dm, top_dm, ring, ring, ...] with flat [x, y, ...] decimetre rings (outer ring first);
+    anchors: feature_anchor() of each part's building. triangulate(rings) -> roof triangles (part-local indices)."""
     size = BUILDING_CHUNK * 10
     chunks = defaultdict(list)
-    for p in parts:
-        chunks[(p[2][0] // size, p[2][1] // size)].append(p)
+    for p, anchor in zip(parts, anchors):
+        chunks[chunk_of(anchor)].append(p)
     firsts = [(p[2][0] / 10, p[2][1] / 10) for p in parts]
     bounds = [min(x for x, _ in firsts), min(y for _, y in firsts), max(x for x, _ in firsts), max(y for _, y in firsts)]
     table, blocks, offset = [], [], 0
     for (ci, cj), ps in sorted(chunks.items()):
         x0, y0 = ci * size, cj * size
+        ps.sort(key=lambda p: not _big(p))  # stable: big parts first
+        big = sum(map(_big, ps))
         heights, coords = array("h"), array("h")
         rings, sizes, roofs, roof = bytearray(), bytearray(), bytearray(), bytearray()
         for p in ps:
@@ -183,14 +209,14 @@ def pack_buildings(parts, lat0, lon0, z0, triangulate):
         assert 2 * verts < 65536, "chunk too large for 16-bit indices"
         block = _le(heights) + _le(coords) + bytes(rings + sizes + roofs + roof)
         block += b"\0" * (-len(block) % 4)
-        table.append([x0, y0, len(ps), len(sizes), verts, len(roof) // 3, offset])
+        table.append([x0, y0, len(ps), len(sizes), verts, len(roof) // 3, offset, big])
         blocks.append(block)
         offset += len(block)
     header = {"lat0": lat0, "lon0": lon0, "z0": z0, "bounds": bounds, "chunk": BUILDING_CHUNK, "chunks": table}
     # Block offsets are absolute, so they depend on the header's own length: repeat until it settles.
     start = 0
     while True:
-        header["chunks"] = [row[:6] + [row[6] + start] for row in table]
+        header["chunks"] = [row[:6] + [row[6] + start] + row[7:] for row in table]
         head = _pack(b"ZGB1", header, [])
         if len(head) == start:
             return head + b"".join(blocks)
@@ -201,7 +227,7 @@ def pack_buildings(parts, lat0, lon0, z0, triangulate):
 def _read_buildings():
     header, data, _ = _unpack(os.path.join(DATA, "buildings.bin"), b"ZGB1")
     parts, tops = [], []
-    for x0, y0, n_parts, n_rings, n_verts, n_tris, off in header["chunks"]:
+    for x0, y0, n_parts, n_rings, n_verts, n_tris, off, *_ in header["chunks"]:
         heights = array("h", data[off : off + 4 * n_parts])
         coords = array("h", data[off + 4 * n_parts : off + 4 * n_parts + 4 * n_verts])
         if sys.byteorder != "little":

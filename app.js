@@ -9,6 +9,12 @@ const STEP = 5 * 60 * 1000; // slider / schedule resolution
 const EYE = 1.2; // m above ground where a terrace is tested for sun
 const CHUNK = 600; // m, buildings are split into square chunks so off-screen ones are skipped
 const TERRAIN_TILE = 50; // terrain cells (2 km) per ground tile
+// Detailed 3D buildings (real roofs), streamed per chunk from the tiles site (tools/build_tiles.py).
+const TILES_URL = new URLSearchParams(location.search).get('tiles') || 'https://zkristo.github.io/zg-sunce-tiles/v1/';
+const DETAIL_NEAR = 1200; // m from the camera to a chunk: load and show its detailed buildings ...
+const DETAIL_FAR = 1500; // ... and go back to blocks beyond this (the gap stops flickering at the edge)
+const DETAIL_PARALLEL = 4; // downloads at a time
+const DETAIL_BUDGET = matchMedia('(pointer: coarse)').matches ? 1.5e6 : 3e6; // triangles of detail kept in memory
 const COLORS = { tree: 0xb1c2ab, evergreen: 0x8fa692, building: 0xcfd2d6, ground: 0xe6e8ea, day: 0xe9edf2, night: 0x161b26, dusk: 0xf1dcc8, sunWarm: 0xffdcb8 };
 const SHADE = 0, TREE = 1, SUN = 2; // state of a terrace
 const STATE_NAME = ['shade', 'tree', 'sun'];
@@ -858,11 +864,107 @@ function frame() {
   needsRender = false;
   updateShadowFrustum();
   if (cafes && Math.abs(zoomFactor() - dotZoom) > 0.01) styleMarkers();
+  updateDetail();
   const camDist = camera.position.distanceTo(controls.target);
   treeGroup.visible = camDist < TREE_MAX_DIST;
   overlayGroups.tram.visible = overlayGroups.stream.visible = camDist < DETAIL_MAX_DIST;
   renderer.render(scene, camera);
   $('needle').style.transform = `rotate(${controls.getAzimuthalAngle()}rad)`;
+}
+
+// ---------- detailed buildings ----------
+//
+// Blocks are always loaded. Chunks near the camera are swapped for the real 3D model once their tile has arrived;
+// further away (or while a tile is loading, or if it fails) the blocks stay, so there are never holes.
+
+const blockChunks = new Map(); // "i_j" → block mesh
+const detail = new Map(); // "i_j" → { mesh, tris, used, ctrl }
+let tileIndex = null; // "i_j" → [bytes, triangles]
+let detailCheck = { t: 0, x: NaN, y: NaN, z: NaN };
+
+async function loadTileIndex(z0) {
+  try {
+    const index = await (await fetch(TILES_URL + 'index.json')).json();
+    if (index.z0 !== z0) return; // built for other building data: heights would not match
+    tileIndex = index.tiles;
+    requestRender();
+  } catch { /* no detailed buildings; the blocks stay */ }
+}
+
+function chunkDistance(key) {
+  const [i, j] = key.split('_').map(Number), p = camera.position;
+  const x0 = i * CHUNK, z1 = -j * CHUNK; // chunk spans x0..x0+CHUNK east and z1-CHUNK..z1 south
+  const dx = Math.max(x0 - p.x, 0, p.x - x0 - CHUNK), dz = Math.max(z1 - CHUNK - p.z, 0, p.z - z1);
+  return Math.hypot(dx, Math.max(0, p.y - 300), dz); // buildings stand below ~300 m
+}
+
+function updateDetail() {
+  if (!tileIndex) return;
+  const p = camera.position, now = performance.now();
+  if (now - detailCheck.t < 250 && Math.hypot(p.x - detailCheck.x, p.y - detailCheck.y, p.z - detailCheck.z) < 20) return;
+  detailCheck = { t: now, x: p.x, y: p.y, z: p.z };
+  const wanted = [];
+  let loading = 0;
+  for (const key of Object.keys(tileIndex)) {
+    const d = chunkDistance(key), have = detail.get(key);
+    const want = d < (have ? DETAIL_FAR : DETAIL_NEAR);
+    if (have) {
+      if (have.ctrl && !want) { have.ctrl.abort(); detail.delete(key); continue; }
+      if (have.ctrl) { loading++; continue; }
+      if (want) have.used = now;
+      have.mesh.visible = want;
+      const block = blockChunks.get(key);
+      if (block) block.visible = !want;
+    } else if (want) {
+      wanted.push([d, key]);
+    }
+  }
+  wanted.sort((a, b) => a[0] - b[0]);
+  for (const [, key] of wanted.slice(0, Math.max(0, DETAIL_PARALLEL - loading))) loadTile(key);
+  trimDetail();
+}
+
+async function loadTile(key) {
+  const ctrl = new AbortController(), entry = { ctrl, tris: tileIndex[key][1], used: performance.now() };
+  detail.set(key, entry);
+  try {
+    const buf = await (await fetch(`${TILES_URL}${key}.bin`, { signal: ctrl.signal })).arrayBuffer();
+    const { header, start } = readBinary(buf, 'ZGD1');
+    const pos = new Int16Array(buf, start, header.verts * 3);
+    const at = start + Math.ceil((header.verts * 6) / 4) * 4;
+    const index = header.index === 32 ? new Uint32Array(buf, at, header.tris * 3) : new Uint16Array(buf, at, header.tris * 3);
+    const g = new THREE.BufferGeometry();
+    g.setAttribute('position', new THREE.BufferAttribute(pos, 3).onUpload(releaseArray));
+    g.setIndex(new THREE.BufferAttribute(index, 1).onUpload(releaseArray));
+    g.computeBoundingSphere();
+    const mesh = new THREE.Mesh(g, buildingMaterial);
+    mesh.position.set(header.x0 / 10, 0, -header.y0 / 10);
+    mesh.scale.setScalar(0.1);
+    mesh.castShadow = mesh.receiveShadow = true;
+    mesh.visible = false; // updateDetail decides
+    scene.add(mesh);
+    entry.mesh = mesh;
+    entry.ctrl = null;
+  } catch {
+    detail.delete(key); // aborted or failed: the block stays
+  }
+  detailCheck.t = 0; // look again right away
+  requestRender();
+}
+
+// Keep the detail that is not on screen only while it fits in the triangle budget, least recently used first out.
+function trimDetail() {
+  let total = 0;
+  for (const e of detail.values()) total += e.tris;
+  if (total <= DETAIL_BUDGET) return;
+  const idle = [...detail].filter(([, e]) => e.mesh && !e.mesh.visible).sort((a, b) => a[1].used - b[1].used);
+  for (const [key, e] of idle) {
+    if (total <= DETAIL_BUDGET) break;
+    scene.remove(e.mesh);
+    e.mesh.geometry.dispose();
+    detail.delete(key);
+    total -= e.tris;
+  }
 }
 
 // ---------- interaction ----------
@@ -1116,8 +1218,10 @@ async function main() {
     const mesh = buildBuildings(buildingData, chunk);
     mesh.castShadow = mesh.receiveShadow = true;
     scene.add(mesh);
+    blockChunks.set(`${chunk[0] / CHUNK / 10}_${chunk[1] / CHUNK / 10}`, mesh);
     return mesh;
   });
+  loadTileIndex(b.header.z0);
 
   const t = readBinary(terrainData, 'ZGT1');
   terrain = { ...t.header, h: new Int16Array(terrainData, t.start, t.header.nx * t.header.ny) };
