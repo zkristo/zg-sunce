@@ -1,5 +1,6 @@
 duckdb
 numpy
+rasterio  # terrain (Copernicus DEM) in build_buildings.py
 # only for tools/build_tiles.py (detailed 3D buildings):
 pyogrio
 fast-simplification

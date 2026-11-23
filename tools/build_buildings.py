@@ -11,7 +11,7 @@ import json
 import math
 from collections import defaultdict
 
-from common import LAT0, LON0, Terrain, feature_anchor, fetch, pack_buildings, pack_terrain, to_local, write_binary
+from common import LAT0, LON0, M_PER_DEG_LAT, M_PER_DEG_LON, Terrain, feature_anchor, fetch, pack_buildings, pack_terrain, to_local, write_binary
 from earcut import earcut
 
 CKAN = "https://data.zagreb.hr/api/3/action/package_show?id="
@@ -39,6 +39,12 @@ MIN_HEIGHT = 2.0  # m
 MIN_AREA = 4.0  # m2
 TERRAIN_CELL = 40  # m
 TERRAIN_RADIUS = 120  # m
+# Away from buildings the ground comes from the Copernicus DEM GLO-30 (30 m, free; © DLR e.V. 2010-2014 and
+# © Airbus Defence and Space GmbH 2014-2018 provided under COPERNICUS by the European Union and ESA).
+DEM_URL = "https://copernicus-dem-30m.s3.amazonaws.com/{0}/{0}.tif"
+DEM_TILES = ["Copernicus_DSM_COG_10_N45_00_E015_00_DEM", "Copernicus_DSM_COG_10_N45_00_E016_00_DEM"]
+DEM_NEAR, DEM_FAR = 300, 600  # m from the nearest buildings: blend from building-based ground to the DEM
+PIT = 5  # m: building-based ground this far below the lowest DEM point around is a basement, not the ground
 
 
 def load_district(slug):
@@ -124,8 +130,49 @@ def centroid(ring):
     return sum(p[0] for p in ring) / len(ring), sum(p[1] for p in ring) / len(ring)
 
 
+def _window(a, op):
+    """3 × 3 neighbourhood of every cell (edges repeated): op = np.minimum / np.maximum, or None for the mean."""
+    import numpy as np
+
+    pad = np.pad(a, 1, mode="edge")
+    views = [pad[1 + dj : pad.shape[0] - 1 + dj, 1 + di : pad.shape[1] - 1 + di] for dj in (-1, 0, 1) for di in (-1, 0, 1)]
+    if op is None:
+        return sum(views) / 9
+    out = views[0]
+    for v in views[1:]:
+        out = op(out, v)
+    return out
+
+
+def dem_grid(x0, y0, nx, ny):
+    """Copernicus GLO-30 surface heights at the terrain grid points (bilinear)."""
+    import numpy as np
+    import rasterio
+
+    lon = LON0 + (x0 + np.arange(nx) * TERRAIN_CELL) / M_PER_DEG_LON
+    lat = LAT0 + (y0 + np.arange(ny) * TERRAIN_CELL) / M_PER_DEG_LAT
+    lo, la = np.meshgrid(lon, lat)
+    out = np.full((ny, nx), np.nan)
+    for tile in DEM_TILES:
+        with rasterio.open(fetch(DEM_URL.format(tile), tile + ".tif", timeout=600)) as r:
+            a = r.read(1).astype(np.float64)
+            col, row = ~r.transform * (lo, la)
+            col, row = col - 0.5, row - 0.5  # relative to pixel centres
+            inside = (col >= -0.5) & (col <= r.width - 0.5) & (row >= -0.5) & (row <= r.height - 0.5) & np.isnan(out)
+            c, rr = np.clip(col[inside], 0, r.width - 1), np.clip(row[inside], 0, r.height - 1)
+            c0 = np.minimum(np.floor(c).astype(int), r.width - 2)
+            r0 = np.minimum(np.floor(rr).astype(int), r.height - 2)
+            fc, fr = c - c0, rr - r0
+            out[inside] = (a[r0, c0] * (1 - fc) * (1 - fr) + a[r0, c0 + 1] * fc * (1 - fr)
+                           + a[r0 + 1, c0] * (1 - fc) * fr + a[r0 + 1, c0 + 1] * fc * fr)
+    if np.isnan(out).any():
+        raise ValueError("terrain grid reaches beyond the downloaded DEM tiles")
+    return out
+
+
 def build_terrain(parts):
-    """Ground elevation grid: a low percentile of nearby Z_Min values (robust against roof-level parts)."""
+    """Ground elevation grid. Near buildings: a low percentile of nearby Z_Min values (robust against roof-level
+    parts), with basement pits fixed from the DEM; far from buildings: the Copernicus DEM, blended in between."""
     xs = [p for rings, _, _ in parts for p in rings[0]]
     x0 = min(p[0] for p in xs) - 2 * TERRAIN_CELL
     y0 = min(p[1] for p in xs) - 2 * TERRAIN_CELL
@@ -152,36 +199,43 @@ def build_terrain(parts):
             if len(near) >= 3:
                 h[j * nx + i] = near[len(near) // 4]
 
-    # Fill cells without buildings from their neighbours, then smooth.
-    empty = [v is None for v in h]
-    while any(v is None for v in h):
-        nxt = h[:]
-        for j in range(ny):
-            for i in range(nx):
-                if h[j * nx + i] is None:
-                    vals = [
-                        h[jj * nx + ii]
-                        for ii, jj in ((i - 1, j), (i + 1, j), (i, j - 1), (i, j + 1))
-                        if 0 <= ii < nx and 0 <= jj < ny and h[jj * nx + ii] is not None
-                    ]
-                    if vals:
-                        nxt[j * nx + i] = sum(vals) / len(vals)
-        h = nxt
+    import numpy as np
+
+    B = np.array([np.nan if v is None else v for v in h]).reshape(ny, nx)
+    built = ~np.isnan(B)
+    surface = dem_grid(x0, y0, nx, ny)  # includes roofs and treetops
+    low = _window(surface, np.minimum)  # lowest point within ±1 cell: the streets and yards in between
+    ground = _window(low, np.maximum)  # "opening": buildings and trees narrower than ~120 m gone, slopes kept
+    # Z_Min of deep underground parts drags the building-based ground into pits; the DEM knows better there.
+    pits = built & (B < low - PIT)
+    B[pits] = low[pits]
+
+    # Fill cells without buildings from their neighbours, noting how far (in cells) each is from buildings.
+    steps = np.where(built, 0, -1)
+    k = 0
+    while np.isnan(B).any():
+        k += 1
+        pad = np.pad(B, 1, constant_values=np.nan)
+        near = np.stack([pad[1:-1, :-2], pad[1:-1, 2:], pad[:-2, 1:-1], pad[2:, 1:-1]])
+        count = (~np.isnan(near)).sum(axis=0)
+        fresh = np.isnan(B) & (count > 0)
+        B[fresh] = (np.nansum(near, axis=0) / np.maximum(count, 1))[fresh]
+        steps[fresh] = k
     # Filled cells get many more passes: the fill leaves ridges that show up under a low sun.
     for step in range(40):
-        nxt = h[:]
-        for j in range(ny):
-            for i in range(nx):
-                if step >= 2 and not empty[j * nx + i]:
-                    continue
-                vals = [
-                    h[jj * nx + ii]
-                    for ii in (i - 1, i, i + 1)
-                    for jj in (j - 1, j, j + 1)
-                    if 0 <= ii < nx and 0 <= jj < ny
-                ]
-                nxt[j * nx + i] = sum(vals) / len(vals)
-        h = nxt
+        smooth = _window(B, None)
+        B = np.where(built & (step >= 2), B, smooth)
+
+    # Far from buildings (Medvednica, fields, the Sava outside the city) the DEM takes over; the median difference
+    # where both exist (vertical datum, leftovers of buildings in the 30 m pixels) is taken off first.
+    offset = np.median((B - ground)[built])
+    dem = ground + offset
+    for _ in range(2):
+        dem = _window(dem, None)
+    t = np.clip((steps * TERRAIN_CELL - DEM_NEAR) / (DEM_FAR - DEM_NEAR), 0, 1)
+    w = t * t * (3 - 2 * t)
+    h = (B * (1 - w) + dem * w).ravel().tolist()
+    print(f"  {pits.sum()} basement pits fixed, DEM offset {offset:+.1f} m, {(w > 0).sum()} of {nx * ny} cells use the DEM")
     return Terrain(x0, y0, TERRAIN_CELL, nx, ny, h)
 
 
