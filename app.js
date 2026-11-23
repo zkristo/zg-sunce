@@ -455,9 +455,19 @@ function dotTexture(fill, ring) {
   return t;
 }
 const spriteMat = (fill, ring) => new THREE.SpriteMaterial({ map: dotTexture(fill, ring), sizeAttenuation: false, depthTest: false, transparent: true });
-const mats = { sun: spriteMat('#ffb800'), tree: spriteMat('#7fa076'), shade: spriteMat('#55606e'), ring: spriteMat('#1f2933', true), user: spriteMat('#2f7cf6') };
+const mats = { ring: spriteMat('#1f2933', true), user: spriteMat('#2f7cf6') };
+// Café dots: one point cloud per state (shade, tree, sun), so all dots of a colour are a single draw call.
+const DOT_COLORS = ['#55606e', '#7fa076', '#ffb800'];
 const markers = new THREE.Group();
 markers.visible = false;
+const dots = DOT_COLORS.map((fill, st) => {
+  const material = new THREE.PointsMaterial({ map: dotTexture(fill), size: 1, sizeAttenuation: false, depthTest: false, transparent: true });
+  const points = new THREE.Points(new THREE.BufferGeometry(), material);
+  points.frustumCulled = false;
+  points.renderOrder = 1 + st; // sunny dots on top
+  markers.add(points);
+  return points;
+});
 const ringSprite = new THREE.Sprite(mats.ring);
 const userSprite = new THREE.Sprite(mats.user);
 ringSprite.visible = userSprite.visible = false;
@@ -474,12 +484,19 @@ let dotZoom = 0;
 const zoomFactor = () => Math.min(DOT_ZOOM_RANGE[1], Math.max(DOT_ZOOM_RANGE[0], Math.sqrt(DOT_ZOOM_REF / camera.position.distanceTo(controls.target))));
 function styleMarkers() {
   dotZoom = zoomFactor();
-  for (const c of cafes) {
-    const px = DOT_PX[c.state] * dotZoom;
-    c.sprite.material = mats[STATE_NAME[c.state]];
-    c.sprite.renderOrder = 1 + c.state;
-    c.sprite.scale.setScalar(pxScale(px));
+  const filled = [0, 0, 0];
+  for (const d of dots) {
+    if (!d.geometry.attributes.position) d.geometry.setAttribute('position', new THREE.BufferAttribute(new Float32Array(cafes.length * 3), 3));
   }
+  for (const c of cafes) {
+    const attr = dots[c.state].geometry.attributes.position;
+    attr.setXYZ(filled[c.state]++, c.pos.x, c.pos.y, c.pos.z);
+  }
+  dots.forEach((d, st) => {
+    d.geometry.attributes.position.needsUpdate = true;
+    d.geometry.setDrawRange(0, filled[st]);
+    d.material.size = DOT_PX[st] * dotZoom; // CSS pixels
+  });
   ringSprite.scale.setScalar(pxScale(Math.max(2 * DOT_PX[SUN] * dotZoom + 4, 16)));
   userSprite.scale.setScalar(pxScale(16));
 }
@@ -740,7 +757,7 @@ function openPanel(name) {
 
 function select(cafe) {
   state.selected = cafe;
-  ringSprite.position.copy(cafe.sprite.position);
+  ringSprite.position.copy(cafe.pos);
   ringSprite.visible = true;
   animateView({ x: cafe.x, y: cafe.y, maxDist: 450 });
   openPanel('cafe');
@@ -854,7 +871,7 @@ function pick(clientX, clientY) {
   const v = new THREE.Vector3();
   let best = null, bestD = coarse ? 30 : 20;
   for (const c of cafes) {
-    v.copy(c.sprite.position).project(camera);
+    v.copy(c.pos).project(camera);
     if (v.z > 1) continue;
     const d = Math.hypot(((v.x + 1) / 2) * innerWidth - clientX, ((1 - v.y) / 2) * innerHeight - clientY) - (c.state === SUN ? 4 : 0);
     if (d < bestD) { best = c; bestD = d; }
@@ -1113,9 +1130,7 @@ async function main() {
   for (const c of cafes) {
     c.sky = Uint8Array.from(atob(c.sky), (ch) => ch.charCodeAt(0));
     c.state = SHADE;
-    c.sprite = new THREE.Sprite(mats.shade);
-    c.sprite.position.set(c.x, c.z + 2, -c.y);
-    markers.add(c.sprite);
+    c.pos = new THREE.Vector3(c.x, c.z + 2, -c.y);
   }
 
   controls.target.set(0, ground(0, 0), 0);
