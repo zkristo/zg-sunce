@@ -10,7 +10,7 @@ const EYE = 1.2; // m above ground where a terrace is tested for sun
 const CHUNK = 600; // m, buildings are split into square chunks so off-screen ones are skipped
 const TERRAIN_TILE = 50; // terrain cells (2 km) per ground tile
 // Detailed 3D buildings (real roofs), streamed per chunk from the tiles site (tools/build_tiles.py).
-const TILES_URL = new URLSearchParams(location.search).get('tiles') || 'https://zkristo.github.io/zg-sunce-tiles/v1/';
+const TILES_URL = new URLSearchParams(location.search).get('tiles') || 'https://zkristo.github.io/zg-sunce-tiles/v2/';
 const DETAIL_NEAR = 1200; // m from the camera to a chunk: load and show its detailed buildings ...
 const DETAIL_FAR = 1500; // ... and go back to blocks beyond this (the gap stops flickering at the edge)
 const DETAIL_PARALLEL = 4; // downloads at a time

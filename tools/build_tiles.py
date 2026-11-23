@@ -2,7 +2,8 @@
 """Build the detailed 3D building tiles (real roofs) that the app streams in when zoomed in.
 
 Source: ZG3D 2022 LoD 2.2 multipatch models per city district (data.zagreb.hr, FGDB), the same buildings as the
-blocks in data/buildings.bin. Every building is cleaned up and simplified, then put into the same 600 m chunk as its
+blocks in data/buildings.bin. Every building is cleaned up (duplicate corners merged, flat triangles dropped, faces
+turned outwards; optionally simplified with --keep), then put into the same 600 m chunk as its
 block version (matched by OBJECTID, see feature_anchor in common.py), one file per chunk:
     <out>/v1/<i>_<j>.bin   "ZGD1", Uint32 header length, JSON header {x0, y0, verts, tris, index}, padding to 4 bytes,
                            Int16 positions [x, height, -y] in decimetres (x, y relative to the chunk origin x0, y0,
@@ -11,7 +12,7 @@ block version (matched by OBJECTID, see feature_anchor in common.py), one file p
 Only chunks whose buildings all come from the processed districts are written, so a tile never hides a building.
 
 Needs pyogrio (GDAL) and fast-simplification:  pip install -r tools/requirements.txt
-Usage:  python3 tools/build_tiles.py [--out ../zg-sunce-tiles] [--districts donji-grad,trnje]
+Usage:  python3 tools/build_tiles.py [--out ../zg-sunce-tiles] [--districts donji-grad,trnje] [--keep 0.5]
 Run after build_buildings.py. The output goes to the separate tiles repo (see README.md).
 """
 import argparse
@@ -28,8 +29,8 @@ from build_buildings import DISTRICTS, load_district
 from common import CACHE, LAT0, LON0, M_PER_DEG_LAT, M_PER_DEG_LON, _pack, _unpack, chunk_of, feature_anchor, fetch, DATA, BUILDING_CHUNK
 from multipatch import triangles
 
-VERSION = 1
-KEEP = 0.5  # share of a building's triangles kept by the simplification
+VERSION = 2
+KEEP = 1.0  # share of a building's triangles kept by the simplification (1 = buildings exactly as modelled)
 MIN_TRIANGLES = 12  # buildings this small are left as they are
 SKIRT = 3.0  # m: the lowest vertices of a building go this far down, so it never floats over the coarse terrain
 
@@ -46,7 +47,7 @@ def district_gdb(slug):
     return glob.glob(os.path.join(folder, "*.gdb"))[0]
 
 
-def building_mesh(wkb, z0):
+def building_mesh(wkb, z0, keep=KEEP):
     """(points in decimetres [x, y, height above z0], triangles) of one building, cleaned and simplified."""
     import fast_simplification
 
@@ -66,9 +67,9 @@ def building_mesh(wkb, z0):
     if not len(faces):
         return None
     pts = points.astype(np.float64)
-    if len(faces) > MIN_TRIANGLES:
+    if keep < 1 and len(faces) > MIN_TRIANGLES:
         centre = pts.mean(axis=0)
-        target = max(MIN_TRIANGLES, int(len(faces) * KEEP))
+        target = max(MIN_TRIANGLES, int(len(faces) * keep))
         simple, faces = fast_simplification.simplify(pts - centre, faces.astype(np.int32), target_count=target)
         pts = np.round(simple + centre)
         pts, inverse = np.unique(pts, axis=0, return_inverse=True)
@@ -107,6 +108,7 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--out", default=os.path.join(os.path.dirname(DATA), "..", "zg-sunce-tiles"))
     ap.add_argument("--districts", default="", help="comma-separated parts of district names; default all")
+    ap.add_argument("--keep", type=float, default=KEEP, help="share of triangles to keep (1 = no simplification)")
     args = ap.parse_args()
     wanted = [d for d in DISTRICTS if not args.districts or any(w in d for w in args.districts.split(","))]
     z0 = _unpack(os.path.join(DATA, "buildings.bin"), b"ZGB1")[0]["z0"]
@@ -135,7 +137,7 @@ def main():
             if anchor is None or wkb is None:
                 missing += 1
                 continue
-            mesh = building_mesh(wkb, z0)
+            mesh = building_mesh(wkb, z0, args.keep)
             if mesh is None:
                 missing += 1
                 continue
