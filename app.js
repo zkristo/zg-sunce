@@ -14,7 +14,8 @@ const TILES_URL = new URLSearchParams(location.search).get('tiles') || 'https://
 const DETAIL_NEAR = 1000; // m from the camera to a chunk in view: load and show its detailed buildings ...
 const DETAIL_AROUND = 300; // ... or to any chunk, in view or not, so turning around does not show blocks
 const DETAIL_FAR = 1300; // back to blocks beyond this (the gap stops flickering at the edge)
-const FAR_LEVEL = 3000; // m: further chunks draw only their big blocks and cast no shadows
+const FAR_LEVEL = 3000; // m: further chunks draw only their big blocks ...
+const SHADOW_FAR = 5000; // m: ... and beyond this cast no shadows (all the way out would triple the zoomed-out cost)
 const DETAIL_PARALLEL = 4; // downloads at a time
 const DETAIL_BUDGET = matchMedia('(pointer: coarse)').matches ? 1.5e6 : 3e6; // triangles of detail kept in memory
 const COLORS = { tree: 0xb1c2ab, evergreen: 0x8fa692, building: 0xcfd2d6, ground: 0xe6e8ea, day: 0xe9edf2, night: 0x161b26, dusk: 0xf1dcc8, sunWarm: 0xffdcb8 };
@@ -980,12 +981,14 @@ function chunkInView(key) {
   return viewFrustum.intersectsBox(chunkBox);
 }
 
-// Far chunks keep only their big blocks and cast no shadows; landmarks are left out once shown in detail.
+// Far chunks keep only their big blocks, and very far ones cast no shadows; landmarks are left out once shown in
+// detail.
 function styleBlocks() {
   for (const [key, mesh] of blockChunks) {
-    const far = chunkDistance(key) > FAR_LEVEL, d = mesh.userData;
-    mesh.geometry.setDrawRange(0, far ? d.bigEnd : landmarksShown ? d.ordinaryEnd : d.end);
-    mesh.castShadow = !far;
+    const d = mesh.userData;
+    const dist = chunkDistance(key);
+    mesh.geometry.setDrawRange(0, dist > FAR_LEVEL ? d.bigEnd : landmarksShown ? d.ordinaryEnd : d.end);
+    mesh.castShadow = dist < SHADOW_FAR;
   }
 }
 
