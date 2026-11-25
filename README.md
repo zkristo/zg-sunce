@@ -37,7 +37,7 @@ Alati koriste standardnu biblioteku Pythona; `fetch_overture.py` treba DuckDB, a
 - Zgrade su prizme od tla do najviše točke krova (`Z_Max`), pa su sjene kosih krovova malo predugačke.
 - Teren je mreža od 40 m: uz zgrade izveden iz njihovih podnožja (podrumske „jame” ispravljene prema Copernicus DEM-u),
   više od 300–600 m od zgrada iz Copernicus DEM-a (30 m; u šumi uključuje krošnje). Tendi i suncobrana nema.
-- Stabla iz katastra su samo ona s javnih površina, većinom stanje iz 2016.; OpenStreetMap dodaje oko 15 000 stabala iz vrtova i dvorišta (bez oznaka veličine pretpostavljeno 8 m visine i krošnje); visina i širina krošnje poznate su samo kao razredi, pa je svako stablo elipsoid približne veličine. Listopadna stabla bacaju sjenu od 15. travnja do 31. listopada. Terasa koju zaklanja samo krošnja prikazuje se zasebno („pod krošnjom”).
+- Stabla iz katastra su samo ona s javnih površina, većinom stanje iz 2016.; OpenStreetMap dodaje oko 15 000 stabala iz vrtova i dvorišta (bez oznaka veličine pretpostavljeno 8 m visine i krošnje); visina i širina krošnje poznate su samo kao razredi, pa je svako stablo elipsoid približne veličine. Listopadna stabla bacaju sjenu od 1. ožujka do 30. studenoga. Terasa koju zaklanja samo krošnja prikazuje se zasebno („pod krošnjom”).
 - Sjena zgrada i terena računa se unaprijed: svaki kafić u `cafes.json` nosi svoj „obzor” (`tools/skyline.py`) —
   najveći kut iznad horizonta do kojeg sežu krovovi ili tlo, za svaki stupanj smjera. Terasa je u sjeni kad je sunce
   niže od obzora u svom smjeru.

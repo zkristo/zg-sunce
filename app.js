@@ -21,7 +21,7 @@ const DETAIL_BUDGET = matchMedia('(pointer: coarse)').matches ? 1.5e6 : 3e6; // 
 const COLORS = { tree: 0xb1c2ab, evergreen: 0x8fa692, trunk: 0xa39a90, building: 0xcfd2d6, ground: 0xe6e8ea, day: 0xe9edf2, night: 0x161b26, dusk: 0xf1dcc8, sunWarm: 0xffdcb8 };
 const SHADE = 0, TREE = 1, SUN = 2; // state of a terrace
 const STATE_NAME = ['shade', 'tree', 'sun'];
-const LEAF_ON = [415, 1031]; // deciduous trees carry leaves from 15 April to 31 October
+const LEAF_ON = [301, 1130]; // deciduous trees carry leaves from 1 March to 30 November (meteorological spring to winter)
 const TREE_CELL = 25; // m, lookup grid for the tree shade test
 const TREE_REACH = 250; // m, how far towards the sun a tree can still shade a terrace
 const TREE_MAX_DIST = 2000; // m, trees are not drawn when the camera is further away
