@@ -18,7 +18,7 @@ const FAR_LEVEL = 3000; // m: further chunks draw only their big blocks ...
 const SHADOW_FAR = 5000; // m: ... and beyond this cast no shadows (all the way out would triple the zoomed-out cost)
 const DETAIL_PARALLEL = 4; // downloads at a time
 const DETAIL_BUDGET = matchMedia('(pointer: coarse)').matches ? 1.5e6 : 3e6; // triangles of detail kept in memory
-const COLORS = { tree: 0xb1c2ab, evergreen: 0x8fa692, building: 0xcfd2d6, ground: 0xe6e8ea, day: 0xe9edf2, night: 0x161b26, dusk: 0xf1dcc8, sunWarm: 0xffdcb8 };
+const COLORS = { tree: 0xb1c2ab, evergreen: 0x8fa692, trunk: 0xa39a90, building: 0xcfd2d6, ground: 0xe6e8ea, day: 0xe9edf2, night: 0x161b26, dusk: 0xf1dcc8, sunWarm: 0xffdcb8 };
 const SHADE = 0, TREE = 1, SUN = 2; // state of a terrace
 const STATE_NAME = ['shade', 'tree', 'sun'];
 const LEAF_ON = [415, 1031]; // deciduous trees carry leaves from 15 April to 31 October
@@ -82,6 +82,7 @@ const treeMats = {
   leaf: new THREE.MeshLambertMaterial({ color: COLORS.tree, flatShading: true, shadowSide: THREE.FrontSide }),
   bare: new THREE.MeshLambertMaterial({ color: COLORS.tree, flatShading: true, transparent: true, opacity: 0.22, depthWrite: false }),
   evergreen: new THREE.MeshLambertMaterial({ color: COLORS.evergreen, flatShading: true, shadowSide: THREE.FrontSide }),
+  trunk: new THREE.MeshLambertMaterial({ color: COLORS.trunk, flatShading: true, shadowSide: THREE.FrontSide }),
 };
 const deciduousMeshes = [];
 const buildingMaterial = new THREE.MeshLambertMaterial({ color: COLORS.building, flatShading: true, shadowSide: THREE.FrontSide });
@@ -302,6 +303,9 @@ function buildTrees(data) {
     cells.get(cell).push(k);
   }
   const crown = new THREE.IcosahedronGeometry(1, 0);
+  // Trunks: open six-sided posts from the ground to the crown centre, shown all year (only for looks: the
+  // café sun test ignores them, they are far thinner than a crown).
+  const trunk = new THREE.CylinderGeometry(1, 1, 1, 6, 1, true).translate(0, 0.5, 0);
   const m = new THREE.Matrix4(), q = new THREE.Quaternion(), up = new THREE.Vector3(0, 1, 0);
   for (const list of cells.values()) {
     const evergreen = t.evergreen[list[0]];
@@ -313,7 +317,14 @@ function buildTrees(data) {
     mesh.computeBoundingSphere();
     mesh.castShadow = mesh.receiveShadow = true;
     if (!evergreen) deciduousMeshes.push(mesh);
-    treeGroup.add(mesh);
+    const posts = new THREE.InstancedMesh(trunk, treeMats.trunk, list.length);
+    list.forEach((k, i) => {
+      const base = ground(t.x[k], t.y[k]) - 0.5, r = Math.max(0.15, 0.025 * (t.z[k] + t.rv[k] - base));
+      posts.setMatrixAt(i, m.compose(new THREE.Vector3(t.x[k], base, -t.y[k]), q.identity(), new THREE.Vector3(r, t.z[k] - base, r)));
+    });
+    posts.computeBoundingSphere();
+    posts.castShadow = posts.receiveShadow = true;
+    treeGroup.add(mesh, posts);
   }
   return t;
 }
