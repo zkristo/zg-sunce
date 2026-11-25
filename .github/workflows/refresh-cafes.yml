@@ -21,7 +21,7 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - run: pip install duckdb numpy # the café list needs only these; tools/requirements.txt lists all
+      - run: pip install -r tools/requirements.txt
       - name: Download Overture places
         run: python3 tools/fetch_overture.py
       - name: Build the café list

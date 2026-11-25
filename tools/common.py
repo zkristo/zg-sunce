@@ -1,5 +1,6 @@
 """Shared helpers for the data tools: local projection, cached downloads, terrain lookup, building index."""
 import functools
+import gzip
 import json
 import math
 import os
@@ -102,134 +103,44 @@ class Terrain:
         return a * (1 - ty) + b * ty
 
 
-# ---------- data/buildings.bin and data/terrain.bin ----------
+# ---------- the map's buildings and ground ----------
 #
-# Both files: 4-byte tag, Uint32 header length, a JSON header padded with spaces so the data after it starts at a
-# multiple of 4 bytes, then little-endian arrays.
-#
-# buildings.bin ("ZGB1"): header {lat0, lon0, z0, bounds: [min x, min y, max x, max y] in m, chunk: size in m,
-# chunks: [[x0, y0, parts, rings, vertices, roof triangles, byte offset, big parts, landmark parts], ...]} with x0, y0 the chunk origin in
-# decimetres. Every chunk is one block:
-# Parts are sorted: big ordinary parts, small ordinary parts, then parts of landmark buildings (tools/landmarks.py).
-# The chunk row's 8th value counts the big ordinary parts (see BIG_PART), which a far view can draw alone; the 9th
-# counts the landmark parts, which the app leaves out once it shows the detailed landmarks.
-#   Int16  heights[2 × parts]      base and top of every part, decimetres above z0
-#   Int16  coords[2 × vertices]    x, y in decimetres: a ring's first vertex relative to the chunk origin,
-#                                  the others relative to the previous vertex
-#   Uint8  rings[parts]            rings per part (outer ring first, then holes)
-#   Uint8  sizes[rings]            vertices per ring
-#   Uint8  roofs[parts]            roof triangles per part
-#   Uint8  roof[3 × triangles]     roof corners as vertex indices within the part, counter-clockwise from above
-#   zero padding to a multiple of 4 bytes
-# terrain.bin ("ZGT1"): header {x0, y0, cell, nx, ny, z0}, then Int16 h[nx × ny], decimetres above z0, row by row
-# from the south-west corner.
+# They come from the published 3D map (zagreb-dedede), the same files the app shows, so the café skylines always
+# match the map. Layouts are described in zagreb-dedede's tools/common.py: buildings.bin ("ZGB1") and terrain.bin
+# ("ZGT1"), each a 4-byte tag, a Uint32 header length, a JSON header and little-endian arrays, stored gzipped.
 
-BUILDING_CHUNK = 600  # m, as CHUNK in app.js
-BIG_PART = (8, 150)  # m tall above ground, or m² footprint: parts kept in the far level of detail
+MAP_DATA = "https://zagreb-dedede.zvonimir-kristo.workers.dev/data/"
+MAP_DATA_AGE = 12 * 3600  # s: a cached copy older than this is downloaded again
 
 
-def feature_anchor(geometry):
-    """Decimetre (x, y) of the first point of a ZG3D GeoJSON feature's first outline. All parts of a building go to
-    the chunk of this point, so the block version and the detailed 3D version (tools/build_tiles.py, matched by
-    OBJECTID) of a building always land in the same chunk."""
-    first = geometry["coordinates"][0][0][0] if geometry["type"] == "MultiPolygon" else geometry["coordinates"][0][0]
-    x, y = to_local(first[0], first[1])
-    return round(x * 10), round(y * 10)
+def _map_file(name):
+    """Bytes of a binary map data file, downloaded (and joined from parts, see parts.json) into tools/cache/."""
+    def fresh(file):
+        path = os.path.join(CACHE, "map_" + file)
+        if os.path.exists(path) and time.time() - os.path.getmtime(path) > MAP_DATA_AGE:
+            os.remove(path)
+        return fetch(MAP_DATA + file, "map_" + file)
+
+    with open(fresh("parts.json"), encoding="utf-8") as f:
+        n = json.load(f).get(name, 1)
+    packed = b""
+    for k in range(n):
+        with open(fresh(f"{name}.gz" + (f".{k}" if n > 1 else "")), "rb") as f:
+            packed += f.read()
+    return gzip.decompress(packed)
 
 
-def chunk_of(anchor):
-    size = BUILDING_CHUNK * 10
-    return anchor[0] // size, anchor[1] // size
-
-
-def _big(p):
-    """Part tall or large enough for the far level of detail (base includes a 3 m skirt below the ground)."""
-    r = p[2]
-    footprint = abs(sum(r[i - 2] * r[i + 1] - r[i] * r[i - 1] for i in range(0, len(r), 2))) / 200  # m²
-    return p[1] - p[0] - 30 >= BIG_PART[0] * 10 or footprint >= BIG_PART[1]
-
-
-def _pack(tag, header, blocks):
-    head = json.dumps(header, separators=(",", ":")).encode()
-    head += b" " * (-(8 + len(head)) % 4)
-    return tag + struct.pack("<I", len(head)) + head + b"".join(blocks)
-
-
-def _unpack(path, tag):
-    with open(path, "rb") as f:
-        data = f.read()
+def _unpack(name, tag):
+    data = _map_file(name)
     if data[:4] != tag:
-        raise ValueError(f"{path} is not a {tag.decode()} file")
+        raise ValueError(f"{name} is not a {tag.decode()} file")
     (n,) = struct.unpack_from("<I", data, 4)
     return json.loads(data[8 : 8 + n]), data, 8 + n
 
 
-def _le(arr):
-    if sys.byteorder != "little":
-        arr.byteswap()
-    return arr.tobytes()
-
-
-def write_binary(name, data):
-    os.makedirs(DATA, exist_ok=True)
-    path = os.path.join(DATA, name)
-    with open(path, "wb") as f:
-        f.write(data)
-    print(f"  wrote data/{name}: {os.path.getsize(path) / 1024:.0f} KB")
-
-
-def pack_buildings(parts, anchors, landmarks, lat0, lon0, z0, triangulate):
-    """parts: [base_dm, top_dm, ring, ring, ...] with flat [x, y, ...] decimetre rings (outer ring first);
-    anchors: feature_anchor() of each part's building; landmarks: whether each part belongs to a landmark.
-    triangulate(rings) -> roof triangles (part-local indices)."""
-    size = BUILDING_CHUNK * 10
-    chunks = defaultdict(list)
-    for p, anchor, landmark in zip(parts, anchors, landmarks):
-        chunks[chunk_of(anchor)].append((landmark, p))
-    firsts = [(p[2][0] / 10, p[2][1] / 10) for p in parts]
-    bounds = [min(x for x, _ in firsts), min(y for _, y in firsts), max(x for x, _ in firsts), max(y for _, y in firsts)]
-    table, blocks, offset = [], [], 0
-    for (ci, cj), ps in sorted(chunks.items()):
-        x0, y0 = ci * size, cj * size
-        ps.sort(key=lambda lp: (lp[0], not _big(lp[1])))  # stable: big, small, landmark
-        big = sum(1 for landmark, p in ps if not landmark and _big(p))
-        marks = sum(1 for landmark, _ in ps if landmark)
-        ps = [p for _, p in ps]
-        heights, coords = array("h"), array("h")
-        rings, sizes, roofs, roof = bytearray(), bytearray(), bytearray(), bytearray()
-        for p in ps:
-            heights.extend(p[:2])
-            rings.append(len(p) - 2)
-            for r in p[2:]:
-                sizes.append(len(r) // 2)
-                px, py = x0, y0
-                for k in range(0, len(r), 2):
-                    coords.extend((r[k] - px, r[k + 1] - py))
-                    px, py = r[k], r[k + 1]
-            tris = triangulate(p[2:])
-            roofs.append(len(tris) // 3)
-            roof.extend(tris)
-        verts = len(coords) // 2
-        assert 2 * verts < 65536, "chunk too large for 16-bit indices"
-        block = _le(heights) + _le(coords) + bytes(rings + sizes + roofs + roof)
-        block += b"\0" * (-len(block) % 4)
-        table.append([x0, y0, len(ps), len(sizes), verts, len(roof) // 3, offset, big, marks])
-        blocks.append(block)
-        offset += len(block)
-    header = {"lat0": lat0, "lon0": lon0, "z0": z0, "bounds": bounds, "chunk": BUILDING_CHUNK, "chunks": table}
-    # Block offsets are absolute, so they depend on the header's own length: repeat until it settles.
-    start = 0
-    while True:
-        header["chunks"] = [row[:6] + [row[6] + start] + row[7:] for row in table]
-        head = _pack(b"ZGB1", header, [])
-        if len(head) == start:
-            return head + b"".join(blocks)
-        start = len(head)
-
-
 @functools.lru_cache(maxsize=1)
 def _read_buildings():
-    header, data, _ = _unpack(os.path.join(DATA, "buildings.bin"), b"ZGB1")
+    header, data, _ = _unpack("buildings.bin", b"ZGB1")
     parts, tops = [], []
     for x0, y0, n_parts, n_rings, n_verts, n_tris, off, *_ in header["chunks"]:
         heights = array("h", data[off : off + 4 * n_parts])
@@ -265,13 +176,9 @@ def load_building_tops():
     return _read_buildings()[2]
 
 
-def pack_terrain(terrain_header, heights_dm):
-    return _pack(b"ZGT1", terrain_header, [_le(array("h", heights_dm))])
-
-
 def load_terrain():
     """{x0, y0, cell, nx, ny, z0, h}: h in decimetres above z0, row by row from the south-west corner."""
-    header, data, start = _unpack(os.path.join(DATA, "terrain.bin"), b"ZGT1")
+    header, data, start = _unpack("terrain.bin", b"ZGT1")
     h = array("h", data[start : start + 2 * header["nx"] * header["ny"]])
     if sys.byteorder != "little":
         h.byteswap()

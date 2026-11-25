@@ -13,24 +13,24 @@
 python3 -m http.server 8000
 ```
 
-Nema build koraka: `index.html` + `app.js` + `style.css`, biblioteke (three.js, three-mesh-bvh, SunCalc) s CDN-a.
+Nema build koraka: `index.html` + `app.js` + `style.css`, biblioteke (three.js, SunCalc) s CDN-a. Sama 3D karta (teren,
+zgrade, zelenilo, vode, ulice, stabla, svjetlo, sjene i kamera) dolazi iz zasebnog repozitorija
+[zagreb-dedede](https://github.com/zkristo/zagreb-dedede) (`https://zagreb-dedede.zvonimir-kristo.workers.dev`);
+ova aplikacija dodaje kafiće, njihovo sunce i sjenu, klizač i popise. `?map=…` učitava modul karte s druge adrese
+(npr. lokalne kopije), `?tiles=…` detaljne zgrade.
 
 ## Podaci
 
 | Datoteka | Izvor | Alat |
 | --- | --- | --- |
-| `data/buildings.bin`, `data/terrain.bin` | [ZG3D 2022, Grad Zagreb](https://data.zagreb.hr/dataset/?q=zg3d) (Otvorena dozvola); binarni zapis s krovovima već trianguliranima (opis u `tools/common.py`); teren uz zgrade iz njihovih podnožja, dalje od njih iz digitalnog modela reljefa [Državne geodetske uprave](https://geoportal.dgu.hr) (INSPIRE servis za preuzimanje, 20 m, golo tlo; otvorena dozvola), a na samom rubu karte iz [Copernicus DEM GLO-30](https://registry.opendata.aws/copernicus-dem/) (© DLR e.V. 2010-2014 i © Airbus Defence and Space GmbH 2014-2018, COPERNICUS, EU i ESA) | `python3 tools/build_buildings.py` |
-| `data/landmarks.json` (znamenite zgrade: ≥ 40 m ili istaknute u OSM-u) | ZG3D + © OpenStreetMap | `python3 tools/landmarks.py` (prije `build_buildings.py`) |
-| detaljne 3D zgrade cijelog grada (pravi krovovi) i znamenitosti, zaseban repozitorij [zg-sunce-tiles](https://github.com/zkristo/zg-sunce-tiles) | ZG3D 2022 LoD 2.2 (FGDB/SHP multipatch), Grad Zagreb (Otvorena dozvola) | `python3 tools/build_tiles.py` u kopiju repozitorija `../zg-sunce-tiles`, zatim jedan novi commit (`git commit --amend`) i `git push --force` |
-| `data/cafes.json` | © [OpenStreetMap](https://www.openstreetmap.org/copyright) doprinositelji (ODbL), Overpass API; kafići kojih nema u OSM-u iz [Overture Maps](https://overturemaps.org/) (CDLA-Permissive-2.0, samo pouzdanost ≥ 0,8) | `python3 tools/fetch_overture.py` (treba `pip install duckdb`), zatim `python3 tools/build_cafes.py` |
-| `data/trees.json` | Katastar zelenila Grada Zagreba ([javni ArcGIS sloj](https://services8.arcgis.com/Usi0jGQwMmBUpFjr/arcgis/rest/services/stablo_SpatialJoin/FeatureServer), bez navedene licence) + © OpenStreetMap (stabla i drvoredi kojih nema u katastru, dalje od 4 m od katastarskog stabla) | `python3 tools/build_trees.py` |
-| `data/map.json`, `data/landcover.bin` | © [OpenStreetMap](https://www.openstreetmap.org/copyright) doprinositelji (ODbL): vode, ulice, pješačke i biciklističke staze, pruge; sve što OSM boji zeleno (parkovi, travnjaci, šume, polja, voćnjaci, šikare…) kao jedna boja tla (polje udaljenosti do ruba na mreži od 10 m, pa su rubovi glatki) | `python3 tools/build_map.py` |
+| `data/cafes.json` | © [OpenStreetMap](https://www.openstreetmap.org/copyright) doprinositelji (ODbL), Overpass API; kafići kojih nema u OSM-u iz [Overture Maps](https://overturemaps.org/) (CDLA-Permissive-2.0, samo pouzdanost ≥ 0,8); obzor svake terase iz zgrada i terena karte | `python3 tools/fetch_overture.py` (treba `pip install duckdb`), zatim `python3 tools/build_cafes.py` |
+| sve ostalo (zgrade, teren, zelenilo, ulice, vode, stabla) | vidi README repozitorija zagreb-dedede | |
 
-Alati koriste standardnu biblioteku Pythona; `fetch_overture.py` treba DuckDB, a `build_cafes.py` numpy
-(`pip install -r tools/requirements.txt`), a preuzete datoteke spremaju u `tools/cache/`
-(obriši mapu za svježe podatke — i nakon promjene područja, jer imena spremljenih datoteka ne ovise o njemu).
-Četvrti su popisane u `DISTRICTS` u `tools/build_buildings.py`. Popis kafića osvježava se sam prvog u mjesecu
-(GitHub Actions, `.github/workflows/refresh-cafes.yml`; može se pokrenuti i ručno u kartici Actions).
+Alati trebaju `pip install -r tools/requirements.txt` i preuzete datoteke spremaju u `tools/cache/` (obriši mapu za
+svježe podatke). Zgrade i teren preuzimaju se s objavljene karte (`MAP_DATA` u `tools/common.py`; kopija starija od
+12 h preuzima se ponovno), pa su obzori terasa uvijek izračunati na karti koju korisnici vide. Popis kafića osvježava
+se sam prvog u mjesecu (GitHub Actions, `.github/workflows/refresh-cafes.yml`; može se pokrenuti i ručno u kartici
+Actions).
 
 ## Ograničenja modela
 
