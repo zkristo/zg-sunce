@@ -5,3 +5,4 @@ rasterio  # terrain (Copernicus DEM) in build_buildings.py
 pyogrio
 pyproj  # three districts are in HTRS96/TM
 fast-simplification
+scipy

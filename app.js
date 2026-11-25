@@ -207,11 +207,12 @@ function terrainAt(x, y) {
   return (tx >= ty ? a + (b - a) * tx + (d - b) * ty : a + (d - c) * tx + (c - a) * ty) / 10;
 }
 
-// Parks and woods: the ground shader looks up the landcover grid (0 ground, 128 park, 255 wood; blended between
-// cells) and tints itself, so they cost no triangles.
+// Parks and woods: the ground shader looks up the landcover grid and tints itself, so they cost no triangles. Each
+// cell holds the distance to the nearest edge of any green (red channel) and of wood (green channel), so the
+// interpolated edge is a smooth line through the cells rather than their staircase.
 function paintLand(material, buf) {
-  const { header: h, start } = readBinary(buf, 'ZGL1');
-  const tex = new THREE.DataTexture(new Uint8Array(buf, start, h.nx * h.ny), h.nx, h.ny, THREE.RedFormat, THREE.UnsignedByteType);
+  const { header: h, start } = readBinary(buf, 'ZGL2');
+  const tex = new THREE.DataTexture(new Uint8Array(buf, start, 2 * h.nx * h.ny), h.nx, h.ny, THREE.RGFormat, THREE.UnsignedByteType);
   tex.unpackAlignment = 1;
   tex.magFilter = THREE.LinearFilter;
   tex.minFilter = THREE.LinearMipmapLinearFilter;
@@ -222,14 +223,17 @@ function paintLand(material, buf) {
     shader.uniforms.landBox = { value: new THREE.Vector4(h.x0, h.y0, h.nx * h.cell, h.ny * h.cell) };
     shader.uniforms.landGreen = { value: new THREE.Color(LAND_COLORS.green) };
     shader.uniforms.landWood = { value: new THREE.Color(LAND_COLORS.wood) };
+    shader.uniforms.landScale = { value: 255 / h.scale };
     shader.vertexShader = shader.vertexShader
       .replace('#include <common>', '#include <common>\nuniform vec4 landBox;\nvarying vec2 vLand;')
       .replace('#include <begin_vertex>', '#include <begin_vertex>\nvLand = vec2((position.x - landBox.x) / landBox.z, (-position.z - landBox.y) / landBox.w);');
     shader.fragmentShader = shader.fragmentShader
-      .replace('#include <common>', '#include <common>\nuniform sampler2D landcover;\nuniform vec3 landGreen;\nuniform vec3 landWood;\nvarying vec2 vLand;')
+      .replace('#include <common>', '#include <common>\nuniform sampler2D landcover;\nuniform vec3 landGreen;\nuniform vec3 landWood;\nuniform float landScale;\nvarying vec2 vLand;')
       .replace('#include <color_fragment>', `#include <color_fragment>
-        float land = texture2D(landcover, vLand).r;
-        diffuseColor.rgb = land < 0.5 ? mix(diffuseColor.rgb, landGreen, land * 2.0) : mix(landGreen, landWood, land * 2.0 - 1.0);`);
+        vec2 edge = (texture2D(landcover, vLand).rg - 128.0 / 255.0) * landScale; // m inside the edge
+        vec2 aa = max(fwidth(edge), vec2(0.05)); // one screen pixel, so the edge is sharp but not jagged
+        vec2 inside = smoothstep(-0.5 * aa, 0.5 * aa, edge);
+        diffuseColor.rgb = mix(mix(diffuseColor.rgb, landGreen, inside.x), landWood, inside.y);`);
   };
 }
 

@@ -3,9 +3,10 @@
 Run after build_buildings.py.
 
 Parks and woods are not drawn as shapes (woods alone would be millions of triangles over the hills): they are painted
-into a 10 m grid that the ground shader uses for its colour. landcover.bin: "ZGL1", Uint32 header length, JSON header
-{x0, y0, cell, nx, ny} padded to 4 bytes, then Uint8 per cell row by row from the south-west corner:
-0 = plain ground, 128 = park / grass, 255 = wood (the shader blends between neighbouring cells).
+into a 10 m grid that the ground shader uses for its colour. landcover.bin: "ZGL2", Uint32 header length, JSON header
+{x0, y0, cell, nx, ny, scale} padded to 4 bytes, then two Uint8 per cell row by row from the south-west corner:
+signed distances to the edge of any green (park, grass or wood) and of wood, 128 + scale × metres, positive inside
+(the shader draws the edge where the interpolated distance crosses zero, so outlines are smooth, not stepped).
 
 Everything is drawn flat on the terrain, so only outlines and centrelines are stored.
 Usage:  python3 tools/build_map.py
@@ -35,15 +36,18 @@ AREA_NAME = {AREA_WATER: "water area", AREA_PEDESTRIAN: "pedestrian area", AREA_
 GREEN_SIMPLIFY = 1.5  # m: park and wood outlines need less detail than water and squares
 LAND_CELL = 10  # m, landcover grid (≤ 4096 cells a side, the largest texture every phone takes)
 LAND_VALUE = {AREA_GREEN: 128, AREA_WOOD: 255}
+LAND_FINE = 2  # m: areas are painted this finely to measure the distance to their edges
+LAND_SCALE = 9  # distance-field steps per metre: a byte holds ±14 m around the edge (a cell diagonal)
+LAND_BLOCK = 256  # landcover cells per side of a block painted at a time
 
 
-def rasterize(shapes, box):
-    """Paint [(value, [ring, ...]), ...] (rings in m; holes by even-odd) into a Uint8 grid of LAND_CELL cells."""
+def rasterize(shapes, box, cell=LAND_CELL, size=None):
+    """Paint [(value, [ring, ...]), ...] (rings in m; holes by even-odd) into a Uint8 grid of cell-sized cells
+    (size = (nx, ny), by default enough to cover the box)."""
     import numpy as np
 
-    nx, ny = math.ceil((box[2] - box[0]) / LAND_CELL), math.ceil((box[3] - box[1]) / LAND_CELL)
-    if max(nx, ny) > 4096:
-        raise ValueError("landcover grid larger than 4096 cells; raise LAND_CELL")
+    LAND_CELL = cell
+    nx, ny = size or (math.ceil((box[2] - box[0]) / LAND_CELL), math.ceil((box[3] - box[1]) / LAND_CELL))
     grid = np.zeros((ny, nx), np.uint8)
     for value, rings in shapes:
         a = np.concatenate([np.asarray(r, dtype=np.float64) for r in rings])
@@ -63,6 +67,39 @@ def rasterize(shapes, box):
                 if i1 >= i0:
                     grid[j, i0 : i1 + 1] = value
     return grid
+
+
+def distance_field(shapes, box):
+    """Landcover as two signed distance fields on the LAND_CELL grid, (ny, nx, 2) Uint8: channel 0 for any green
+    (park or wood), channel 1 for wood; 128 + LAND_SCALE × metres to the nearest edge, positive inside. The app
+    draws the edge where the interpolated value crosses 128, so outlines stay smooth and straight between cells."""
+    import numpy as np
+    from scipy.ndimage import distance_transform_edt
+
+    nx, ny = math.ceil((box[2] - box[0]) / LAND_CELL), math.ceil((box[3] - box[1]) / LAND_CELL)
+    if max(nx, ny) > 4096:
+        raise ValueError("landcover grid larger than 4096 cells; raise LAND_CELL")
+    out = np.zeros((ny, nx, 2), np.uint8)
+    k = LAND_CELL // LAND_FINE
+    margin = math.ceil(128 / LAND_SCALE / LAND_CELL) + 1  # cells: the distances that fit a byte
+    bounds = [(min(min(x for x, _ in r) for r in rings), min(min(y for _, y in r) for r in rings),
+               max(max(x for x, _ in r) for r in rings), max(max(y for _, y in r) for r in rings)) for _, rings in shapes]
+    for bj in range(0, ny, LAND_BLOCK):
+        for bi in range(0, nx, LAND_BLOCK):
+            i0, j0 = bi - margin, bj - margin
+            w, h = min(LAND_BLOCK, nx - bi) + 2 * margin, min(LAND_BLOCK, ny - bj) + 2 * margin
+            sub = (box[0] + i0 * LAND_CELL, box[1] + j0 * LAND_CELL)
+            end = (sub[0] + w * LAND_CELL, sub[1] + h * LAND_CELL)
+            near = [s for s, b in zip(shapes, bounds) if b[0] < end[0] and b[2] > sub[0] and b[1] < end[1] and b[3] > sub[1]]
+            fine = rasterize(near, (*sub, *end), LAND_FINE, (w * k, h * k))
+            for c, mask in enumerate((fine > 0, fine == LAND_VALUE[AREA_WOOD])):
+                if mask.all() or not mask.any():
+                    d = np.full(mask.shape, 1e3 if mask.all() else -1e3)
+                else:  # metres from each fine cell centre to the edge
+                    d = (np.where(mask, distance_transform_edt(mask) - 0.5, 0.5 - distance_transform_edt(~mask))) * LAND_FINE
+                d = d[k // 2 :: k, k // 2 :: k][margin : margin + min(LAND_BLOCK, ny - bj), margin : margin + min(LAND_BLOCK, nx - bi)]
+                out[bj : bj + d.shape[0], bi : bi + d.shape[1], c] = np.clip(np.round(128 + LAND_SCALE * d), 0, 255)
+    return out
 
 
 def area_kind(tags):
@@ -282,9 +319,9 @@ out geom;"""
     # classes: [name, width_dm]; lines: [class, bridge, x, y, x, y, ...]; areas: [kind, outer, hole, ...]
     # (kind 0 = water, 1 = pedestrian square). Coordinates in decimetres, x = east, y = north.
     # Woods first, parks on top of them.
-    grid = rasterize(sorted(land, key=lambda s: -s[0]), box)
-    header = {"x0": box[0], "y0": box[1], "cell": LAND_CELL, "nx": grid.shape[1], "ny": grid.shape[0]}
-    write_binary("landcover.bin", _pack(b"ZGL1", header, [grid.tobytes()]))
+    grid = distance_field(sorted(land, key=lambda s: -s[0]), box)
+    header = {"x0": box[0], "y0": box[1], "cell": LAND_CELL, "nx": grid.shape[1], "ny": grid.shape[0], "scale": LAND_SCALE}
+    write_binary("landcover.bin", _pack(b"ZGL2", header, [grid.tobytes()]))
     write_json("map.json", {"classes": [[name, round(width * 10)] for name, width in CLASSES], "lines": lines, "areas": areas})
 
 
