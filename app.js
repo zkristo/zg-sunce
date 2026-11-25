@@ -80,11 +80,10 @@ let trees = null; // { n, x, y, z, rh, rv, evergreen, grid } — crowns are elli
 const treeGroup = new THREE.Group();
 const treeMats = {
   leaf: new THREE.MeshLambertMaterial({ color: COLORS.tree, flatShading: true, shadowSide: THREE.FrontSide }),
-  bare: new THREE.MeshLambertMaterial({ color: COLORS.tree, flatShading: true, transparent: true, opacity: 0.22, depthWrite: false }),
   evergreen: new THREE.MeshLambertMaterial({ color: COLORS.evergreen, flatShading: true, shadowSide: THREE.FrontSide }),
   trunk: new THREE.MeshLambertMaterial({ color: COLORS.trunk, flatShading: true, shadowSide: THREE.FrontSide }),
 };
-const deciduousMeshes = [];
+const deciduousMeshes = []; // [crowns, bare branches] per cell: crowns while in leaf, branches otherwise
 const buildingMaterial = new THREE.MeshLambertMaterial({ color: COLORS.building, flatShading: true, shadowSide: THREE.FrontSide });
 let needsRender = true;
 let tween = null;
@@ -282,6 +281,54 @@ function buildTerrain(t, land) {
 const treeKey = (i, j) => (i + 4096) * 8192 + j + 4096;
 
 // Every tree is a low-poly ellipsoid crown; the same ellipsoids are used for the shade test.
+// Trees are instanced: one trunk and one bare-branch shape, placed, turned and sized per tree.
+const FORK = 0.55; // the trunk forks this far (× crown half-height) below the crown centre
+const TRUNK = 0.05; // trunk radius at the ground, × crown radius
+const TAPER = 0.75; // trunk radius at the fork, × radius at the ground
+
+// Open three-sided segments [from, to, radius at from, radius at to], merged into one geometry.
+function taperedPrisms(segments) {
+  const pos = [], u = new THREE.Vector3(), v = new THREE.Vector3(), d = new THREE.Vector3();
+  for (const [a, b, ra, rb] of segments) {
+    d.subVectors(b, a).normalize();
+    u.set(0, 0, 1).cross(d);
+    if (u.lengthSq() < 1e-6) u.set(1, 0, 0);
+    u.normalize();
+    v.crossVectors(d, u);
+    const ring = (c, r) => [0, 1, 2].map((k) => c.clone().addScaledVector(u, r * Math.cos(k * 2.0944)).addScaledVector(v, r * Math.sin(k * 2.0944)));
+    const A = ring(a, ra), B = ring(b, rb);
+    for (let k = 0; k < 3; k++) {
+      const n = (k + 1) % 3;
+      for (const p of [A[k], B[n], B[k], A[k], A[n], B[n]]) pos.push(p.x, p.y, p.z);
+    }
+  }
+  const geo = new THREE.BufferGeometry();
+  geo.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
+  geo.computeVertexNormals();
+  return geo;
+}
+
+// Bare branches in the crown's unit space (centre 0, radius 1): five limbs from the fork, each to a mid point
+// halfway towards the crown corners in its fifth of the compass, then a twig to every such corner. Every segment
+// starts as thick as the one it grows from ends.
+function branchGeometry(crown) {
+  const p = crown.attributes.position, tips = [];
+  for (let i = 0; i < p.count; i++) {
+    const c = new THREE.Vector3().fromBufferAttribute(p, i);
+    if (c.y > -0.6 && !tips.some((t) => t.distanceTo(c) < 1e-4)) tips.push(c.multiplyScalar(0.95));
+  }
+  const fork = new THREE.Vector3(0, -FORK, 0), r0 = TRUNK * TAPER, r1 = 0.6 * r0, r2 = 0.1 * r0;
+  const limbs = [[], [], [], [], []], segments = [];
+  for (const t of tips) limbs[Math.floor(((Math.atan2(t.z, t.x) + Math.PI) / (2 * Math.PI)) * 5) % 5].push(t);
+  for (const g of limbs) {
+    if (!g.length) continue;
+    const mid = g.reduce((s, t) => s.add(t), new THREE.Vector3()).divideScalar(g.length).lerp(fork, 0.5);
+    mid.y += 0.1;
+    segments.push([fork, mid, r0, r1], ...g.map((t) => [mid, t, r1, r2]));
+  }
+  return taperedPrisms(segments);
+}
+
 function buildTrees(data) {
   const n = data.t.length / 3;
   const t = { n, x: new Float32Array(n), y: new Float32Array(n), z: new Float32Array(n), rh: new Float32Array(n), rv: new Float32Array(n), evergreen: new Uint8Array(n), grid: new Map() };
@@ -302,10 +349,10 @@ function buildTrees(data) {
     if (!cells.has(cell)) cells.set(cell, []);
     cells.get(cell).push(k);
   }
-  const crown = new THREE.IcosahedronGeometry(1, 0);
-  // Trunks: open six-sided posts from the ground to the crown centre, shown all year (only for looks: the
-  // café sun test ignores them, they are far thinner than a crown).
-  const trunk = new THREE.CylinderGeometry(1, 1, 1, 6, 1, true).translate(0, 0.5, 0);
+  const crown = new THREE.IcosahedronGeometry(1, 0), branches = branchGeometry(crown);
+  // Trunk: a three-sided post from the ground to the fork (FORK below the crown centre), thinning to TAPER;
+  // shown all year. Trunks and branches are only for looks: the café sun test uses the crowns.
+  const trunk = taperedPrisms([[new THREE.Vector3(0, 0, 0), new THREE.Vector3(0, 1, 0), 1, TAPER]]);
   const m = new THREE.Matrix4(), q = new THREE.Quaternion(), up = new THREE.Vector3(0, 1, 0);
   for (const list of cells.values()) {
     const evergreen = t.evergreen[list[0]];
@@ -316,15 +363,26 @@ function buildTrees(data) {
     });
     mesh.computeBoundingSphere();
     mesh.castShadow = mesh.receiveShadow = true;
-    if (!evergreen) deciduousMeshes.push(mesh);
     const posts = new THREE.InstancedMesh(trunk, treeMats.trunk, list.length);
+    const bare = evergreen ? null : new THREE.InstancedMesh(branches, treeMats.trunk, list.length);
     list.forEach((k, i) => {
-      const base = ground(t.x[k], t.y[k]) - 0.5, r = Math.max(0.15, 0.025 * (t.z[k] + t.rv[k] - base));
-      posts.setMatrixAt(i, m.compose(new THREE.Vector3(t.x[k], base, -t.y[k]), q.identity(), new THREE.Vector3(r, t.z[k] - base, r)));
+      const base = ground(t.x[k], t.y[k]) - 0.5, fork = t.z[k] - FORK * t.rv[k];
+      const r = TRUNK * t.rh[k]; // so the trunk ends as thick as the limbs start
+      q.setFromAxisAngle(up, k * 2.4);
+      posts.setMatrixAt(i, m.compose(new THREE.Vector3(t.x[k], base, -t.y[k]), q, new THREE.Vector3(r, fork - base, r)));
+      bare?.setMatrixAt(i, m.compose(new THREE.Vector3(t.x[k], t.z[k], -t.y[k]), q, new THREE.Vector3(t.rh[k], t.rv[k], t.rh[k])));
     });
-    posts.computeBoundingSphere();
-    posts.castShadow = posts.receiveShadow = true;
-    treeGroup.add(mesh, posts);
+    for (const p of [posts, bare]) {
+      if (!p) continue;
+      p.computeBoundingSphere();
+      p.castShadow = p.receiveShadow = true;
+      treeGroup.add(p);
+    }
+    treeGroup.add(mesh);
+    if (bare) {
+      bare.visible = false;
+      deciduousMeshes.push([mesh, bare]);
+    }
   }
   return t;
 }
@@ -492,9 +550,9 @@ let leafShown = true;
 function showLeaves(leaf) {
   if (leaf === leafShown) return;
   leafShown = leaf;
-  for (const mesh of deciduousMeshes) {
-    mesh.material = leaf ? treeMats.leaf : treeMats.bare;
-    mesh.castShadow = leaf;
+  for (const [crowns, bare] of deciduousMeshes) {
+    crowns.visible = leaf;
+    bare.visible = !leaf;
   }
 }
 
