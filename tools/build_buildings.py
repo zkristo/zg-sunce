@@ -38,7 +38,7 @@ DISTRICTS = [
 ]
 MIN_HEIGHT = 2.0  # m
 MIN_AREA = 4.0  # m2
-TERRAIN_CELL = 40  # m
+TERRAIN_CELL = 20  # m, the spacing of the DGU height model
 TERRAIN_RADIUS = 120  # m
 # Away from buildings the ground comes from the State Geodetic Administration's height model (DGU, INSPIRE
 # elevation download service, 20 m, bare ground, EPSG:3045; open licence). The few cells past its edge take the
@@ -262,7 +262,7 @@ def build_terrain(parts):
         B[fresh] = (np.nansum(near, axis=0) / np.maximum(count, 1))[fresh]
         steps[fresh] = k
     # Filled cells get many more passes: the fill leaves ridges that show up under a low sun.
-    for step in range(40):
+    for step in range(40 * (40 // TERRAIN_CELL) ** 2):  # as much smoothing (in metres) as on a 40 m grid
         smooth = _window(B, None)
         B = np.where(built & (step >= 2), B, smooth)
 

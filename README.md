@@ -35,7 +35,7 @@ Alati koriste standardnu biblioteku Pythona; `fetch_overture.py` treba DuckDB, a
 ## Ograničenja modela
 
 - Zgrade su prizme od tla do najviše točke krova (`Z_Max`), pa su sjene kosih krovova malo predugačke.
-- Teren je mreža od 40 m: uz zgrade izveden iz njihovih podnožja (podrumske „jame” ispravljene prema modelu DGU-a),
+- Teren je mreža od 20 m (dalje od 2 km od kamere crta se svaka druga točka): uz zgrade izveden iz njihovih podnožja (podrumske „jame” ispravljene prema modelu DGU-a),
   više od 300–600 m od zgrada iz digitalnog modela reljefa DGU-a (20 m, golo tlo bez krošanja i zgrada). Tendi i suncobrana nema.
 - Stabla iz katastra su samo ona s javnih površina, većinom stanje iz 2016.; OpenStreetMap dodaje oko 15 000 stabala iz vrtova i dvorišta (bez oznaka veličine pretpostavljeno 8 m visine i krošnje); visina i širina krošnje poznate su samo kao razredi, pa je svako stablo elipsoid približne veličine. Listopadna stabla bacaju sjenu od 1. ožujka do 30. studenoga. Terasa koju zaklanja samo krošnja prikazuje se zasebno („pod krošnjom”).
 - Sjena zgrada i terena računa se unaprijed: svaki kafić u `cafes.json` nosi svoj „obzor” (`tools/skyline.py`) —

@@ -8,7 +8,9 @@ const DEG = Math.PI / 180;
 const STEP = 5 * 60 * 1000; // slider / schedule resolution
 const EYE = 1.2; // m above ground where a terrace is tested for sun
 const CHUNK = 600; // m, buildings are split into square chunks so off-screen ones are skipped
-const TERRAIN_TILE = 50; // terrain cells (2 km) per ground tile
+const TERRAIN_TILE_M = 2000; // m per ground tile side
+const TERRAIN_FINE = 2000; // m: ground tiles closer than this use every height point, further ones every other
+const TERRAIN_SKIRT = 4; // m: tile edges hang down this far, hiding the seam where a fine tile meets a coarse one
 // Detailed 3D buildings (real roofs), streamed per chunk from the tiles site (tools/build_tiles.py).
 const TILES_URL = new URLSearchParams(location.search).get('tiles') || 'https://zkristo.github.io/zg-sunce-tiles/v3/';
 const DETAIL_NEAR = 1000; // m from the camera to a chunk in view: load and show its detailed buildings ...
@@ -83,6 +85,7 @@ const treeMats = {
   evergreen: new THREE.MeshLambertMaterial({ color: COLORS.evergreen, flatShading: true, shadowSide: THREE.FrontSide }),
   trunk: new THREE.MeshLambertMaterial({ color: COLORS.trunk, flatShading: true, shadowSide: THREE.FrontSide }),
 };
+const terrainTiles = []; // ground meshes; userData: {x0, y0, x1, y1} in m and the fine / coarse index ranges
 const deciduousMeshes = []; // [crowns, bare branches] per cell: crowns while in leaf, branches otherwise
 const buildingMaterial = new THREE.MeshLambertMaterial({ color: COLORS.building, flatShading: true, shadowSide: THREE.FrontSide });
 let needsRender = true;
@@ -244,31 +247,50 @@ function buildTerrain(t, land) {
   const material = new THREE.MeshLambertMaterial({ color: COLORS.ground });
   if (land) paintLand(material, land);
   const h = (i, j) => t.h[Math.min(Math.max(j, 0), t.ny - 1) * t.nx + Math.min(Math.max(i, 0), t.nx - 1)] / 10;
-  for (let j0 = 0; j0 < t.ny - 1; j0 += TERRAIN_TILE) {
-    for (let i0 = 0; i0 < t.nx - 1; i0 += TERRAIN_TILE) {
-      const w = Math.min(TERRAIN_TILE, t.nx - 1 - i0) + 1, d = Math.min(TERRAIN_TILE, t.ny - 1 - j0) + 1;
-      const pos = new Float32Array(w * d * 3), normal = new Float32Array(w * d * 3);
-      const index = new Uint16Array((w - 1) * (d - 1) * 6);
-      let k = 0;
-      for (let b = 0; b < d; b++) {
-        for (let a = 0; a < w; a++) {
-          const i = i0 + a, j = j0 + b, v = (b * w + a) * 3;
-          const ex = (h(i + 1, j) - h(i - 1, j)) / (2 * t.cell), ny = (h(i, j + 1) - h(i, j - 1)) / (2 * t.cell);
-          const len = Math.hypot(ex, 1, ny);
-          pos[v] = t.x0 + i * t.cell;
-          pos[v + 1] = h(i, j);
-          pos[v + 2] = -(t.y0 + j * t.cell);
-          normal[v] = -ex / len;
-          normal[v + 1] = 1 / len;
-          normal[v + 2] = ny / len;
-          if (a < w - 1 && b < d - 1) {
-            // Same diagonal as terrainAt(): triangles (i, j)(i+1, j)(i+1, j+1) and (i, j)(i+1, j+1)(i, j+1).
-            const p = b * w + a;
-            index.set([p, p + 1, p + w + 1, p, p + w + 1, p + w], k);
-            k += 6;
+  const tile = 2 * Math.round(TERRAIN_TILE_M / t.cell / 2); // cells per tile, even so the coarse grid lines up
+  for (let j0 = 0; j0 < t.ny - 1; j0 += tile) {
+    for (let i0 = 0; i0 < t.nx - 1; i0 += tile) {
+      const w = Math.min(tile, t.nx - 1 - i0) + 1, d = Math.min(tile, t.ny - 1 - j0) + 1;
+      // Edge points: the tile's outline, each also copied TERRAIN_SKIRT lower for the skirt.
+      const edge = [];
+      for (let a = 0; a < w - 1; a++) edge.push([a, 0]);
+      for (let b = 0; b < d - 1; b++) edge.push([w - 1, b]);
+      for (let a = w - 1; a > 0; a--) edge.push([a, d - 1]);
+      for (let b = d - 1; b > 0; b--) edge.push([0, b]);
+      const n = w * d + edge.length;
+      const pos = new Float32Array(n * 3), normal = new Float32Array(n * 3);
+      const put = (v, a, b, drop) => {
+        const i = i0 + a, j = j0 + b;
+        const ex = (h(i + 1, j) - h(i - 1, j)) / (2 * t.cell), ny = (h(i, j + 1) - h(i, j - 1)) / (2 * t.cell);
+        const len = Math.hypot(ex, 1, ny);
+        pos.set([t.x0 + i * t.cell, h(i, j) - drop, -(t.y0 + j * t.cell)], v * 3);
+        normal.set([-ex / len, 1 / len, ny / len], v * 3);
+      };
+      for (let b = 0; b < d; b++) for (let a = 0; a < w; a++) put(b * w + a, a, b, 0);
+      edge.forEach(([a, b], e) => put(w * d + e, a, b, TERRAIN_SKIRT));
+      // Same diagonal as terrainAt(): triangles (i, j)(i+1, j)(i+1, j+1) and (i, j)(i+1, j+1)(i, j+1).
+      const grid = (step) => {
+        const out = [];
+        for (let b = 0; b + step < d; b += step) {
+          for (let a = 0; a + step < w; a += step) {
+            const p = b * w + a, r = p + step, u = p + step * w;
+            out.push(p, r, u + step, p, u + step, u);
           }
         }
-      }
+        return out;
+      };
+      const skirt = (step) => { // a wall from every step-th edge point down to its lowered copy, both faces
+        const out = [], ks = edge.map((_, e) => e).filter((e) => edge[e][0] % step === 0 && edge[e][1] % step === 0);
+        ks.forEach((e, q) => {
+          const f = ks[(q + 1) % ks.length], [a, b] = edge[e], [c, dd] = edge[f];
+          const top0 = b * w + a, top1 = dd * w + c, low0 = w * d + e, low1 = w * d + f;
+          out.push(top0, low0, top1, top1, low0, low1, top0, top1, low0, top1, low1, low0);
+        });
+        return out;
+      };
+      // Odd-sized edge tiles keep their last row and column only in the fine version.
+      const fine = [...grid(1), ...skirt(1)], coarse = (w % 2 && d % 2) ? [...grid(2), ...skirt(2)] : fine;
+      const index = new Uint16Array(coarse === fine ? fine : [...fine, ...coarse]);
       const g = new THREE.BufferGeometry();
       g.setAttribute('position', new THREE.BufferAttribute(pos, 3).onUpload(releaseArray));
       g.setAttribute('normal', new THREE.BufferAttribute(normal, 3).onUpload(releaseArray));
@@ -276,10 +298,27 @@ function buildTerrain(t, land) {
       g.computeBoundingSphere();
       const mesh = new THREE.Mesh(g, material);
       mesh.receiveShadow = true;
+      mesh.userData = {
+        x0: t.x0 + i0 * t.cell, y0: t.y0 + j0 * t.cell, x1: t.x0 + (i0 + w - 1) * t.cell, y1: t.y0 + (j0 + d - 1) * t.cell,
+        fine: [0, fine.length], coarse: coarse === fine ? [0, fine.length] : [fine.length, coarse.length],
+      };
+      terrainTiles.push(mesh);
       group.add(mesh);
     }
   }
+  styleTerrain();
   return group;
+}
+
+// Near ground tiles draw every height point, far ones every other (their skirts hide the seams).
+function styleTerrain() {
+  const p = camera.position, up = Math.max(0, p.y - ground(p.x, -p.z));
+  for (const mesh of terrainTiles) {
+    const u = mesh.userData;
+    const dx = Math.max(u.x0 - p.x, 0, p.x - u.x1), dy = Math.max(u.y0 + p.z, 0, -p.z - u.y1);
+    const [start, count] = Math.hypot(dx, dy, up) < TERRAIN_FINE ? u.fine : u.coarse;
+    mesh.geometry.setDrawRange(start, count);
+  }
 }
 
 const treeKey = (i, j) => (i + 4096) * 8192 + j + 4096;
@@ -1070,6 +1109,7 @@ function updateDetail() {
   if (now - detailCheck.t < 250 && Math.hypot(p.x - detailCheck.x, p.y - detailCheck.y, p.z - detailCheck.z) < 20) return;
   detailCheck = { t: now, x: p.x, y: p.y, z: p.z };
   styleBlocks();
+  styleTerrain();
   if (!tileIndex) return;
   camera.updateMatrixWorld();
   viewFrustum.setFromProjectionMatrix(viewMatrix.multiplyMatrices(camera.projectionMatrix, camera.matrixWorldInverse));
