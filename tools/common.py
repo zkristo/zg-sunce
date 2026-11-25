@@ -108,10 +108,11 @@ class Terrain:
 # multiple of 4 bytes, then little-endian arrays.
 #
 # buildings.bin ("ZGB1"): header {lat0, lon0, z0, bounds: [min x, min y, max x, max y] in m, chunk: size in m,
-# chunks: [[x0, y0, parts, rings, vertices, roof triangles, byte offset, big parts], ...]} with x0, y0 the chunk origin in
+# chunks: [[x0, y0, parts, rings, vertices, roof triangles, byte offset, big parts, landmark parts], ...]} with x0, y0 the chunk origin in
 # decimetres. Every chunk is one block:
-# Parts are sorted big first; the chunk row's 8th value counts the big ones (see BIG_PART), which a far view can
-# draw alone.
+# Parts are sorted: big ordinary parts, small ordinary parts, then parts of landmark buildings (tools/landmarks.py).
+# The chunk row's 8th value counts the big ordinary parts (see BIG_PART), which a far view can draw alone; the 9th
+# counts the landmark parts, which the app leaves out once it shows the detailed landmarks.
 #   Int16  heights[2 × parts]      base and top of every part, decimetres above z0
 #   Int16  coords[2 × vertices]    x, y in decimetres: a ring's first vertex relative to the chunk origin,
 #                                  the others relative to the previous vertex
@@ -177,20 +178,23 @@ def write_binary(name, data):
     print(f"  wrote data/{name}: {os.path.getsize(path) / 1024:.0f} KB")
 
 
-def pack_buildings(parts, anchors, lat0, lon0, z0, triangulate):
+def pack_buildings(parts, anchors, landmarks, lat0, lon0, z0, triangulate):
     """parts: [base_dm, top_dm, ring, ring, ...] with flat [x, y, ...] decimetre rings (outer ring first);
-    anchors: feature_anchor() of each part's building. triangulate(rings) -> roof triangles (part-local indices)."""
+    anchors: feature_anchor() of each part's building; landmarks: whether each part belongs to a landmark.
+    triangulate(rings) -> roof triangles (part-local indices)."""
     size = BUILDING_CHUNK * 10
     chunks = defaultdict(list)
-    for p, anchor in zip(parts, anchors):
-        chunks[chunk_of(anchor)].append(p)
+    for p, anchor, landmark in zip(parts, anchors, landmarks):
+        chunks[chunk_of(anchor)].append((landmark, p))
     firsts = [(p[2][0] / 10, p[2][1] / 10) for p in parts]
     bounds = [min(x for x, _ in firsts), min(y for _, y in firsts), max(x for x, _ in firsts), max(y for _, y in firsts)]
     table, blocks, offset = [], [], 0
     for (ci, cj), ps in sorted(chunks.items()):
         x0, y0 = ci * size, cj * size
-        ps.sort(key=lambda p: not _big(p))  # stable: big parts first
-        big = sum(map(_big, ps))
+        ps.sort(key=lambda lp: (lp[0], not _big(lp[1])))  # stable: big, small, landmark
+        big = sum(1 for landmark, p in ps if not landmark and _big(p))
+        marks = sum(1 for landmark, _ in ps if landmark)
+        ps = [p for _, p in ps]
         heights, coords = array("h"), array("h")
         rings, sizes, roofs, roof = bytearray(), bytearray(), bytearray(), bytearray()
         for p in ps:
@@ -209,7 +213,7 @@ def pack_buildings(parts, anchors, lat0, lon0, z0, triangulate):
         assert 2 * verts < 65536, "chunk too large for 16-bit indices"
         block = _le(heights) + _le(coords) + bytes(rings + sizes + roofs + roof)
         block += b"\0" * (-len(block) % 4)
-        table.append([x0, y0, len(ps), len(sizes), verts, len(roof) // 3, offset, big])
+        table.append([x0, y0, len(ps), len(sizes), verts, len(roof) // 3, offset, big, marks])
         blocks.append(block)
         offset += len(block)
     header = {"lat0": lat0, "lon0": lon0, "z0": z0, "bounds": bounds, "chunk": BUILDING_CHUNK, "chunks": table}

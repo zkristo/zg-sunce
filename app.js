@@ -10,9 +10,11 @@ const EYE = 1.2; // m above ground where a terrace is tested for sun
 const CHUNK = 600; // m, buildings are split into square chunks so off-screen ones are skipped
 const TERRAIN_TILE = 50; // terrain cells (2 km) per ground tile
 // Detailed 3D buildings (real roofs), streamed per chunk from the tiles site (tools/build_tiles.py).
-const TILES_URL = new URLSearchParams(location.search).get('tiles') || 'https://zkristo.github.io/zg-sunce-tiles/v2/';
-const DETAIL_NEAR = 1200; // m from the camera to a chunk: load and show its detailed buildings ...
-const DETAIL_FAR = 1500; // ... and go back to blocks beyond this (the gap stops flickering at the edge)
+const TILES_URL = new URLSearchParams(location.search).get('tiles') || 'https://zkristo.github.io/zg-sunce-tiles/v3/';
+const DETAIL_NEAR = 1000; // m from the camera to a chunk in view: load and show its detailed buildings ...
+const DETAIL_AROUND = 300; // ... or to any chunk, in view or not, so turning around does not show blocks
+const DETAIL_FAR = 1300; // back to blocks beyond this (the gap stops flickering at the edge)
+const FAR_LEVEL = 3000; // m: further chunks draw only their big blocks and cast no shadows
 const DETAIL_PARALLEL = 4; // downloads at a time
 const DETAIL_BUDGET = matchMedia('(pointer: coarse)').matches ? 1.5e6 : 3e6; // triangles of detail kept in memory
 const COLORS = { tree: 0xb1c2ab, evergreen: 0x8fa692, building: 0xcfd2d6, ground: 0xe6e8ea, day: 0xe9edf2, night: 0x161b26, dusk: 0xf1dcc8, sunWarm: 0xffdcb8 };
@@ -145,15 +147,18 @@ function readBinary(buf, tag) {
 
 // One chunk of buildings: every part is a prism (bottom and top vertices, walls, roof triangulated offline).
 // Positions stay 16-bit decimetres relative to the chunk origin; the mesh is scaled and moved into place.
-function buildBuildings(buf, [x0, y0, nParts, nRings, nVerts, nTris, offset]) {
+function buildBuildings(buf, [x0, y0, nParts, nRings, nVerts, nTris, offset, nBig = 0, nLandmark = 0]) {
   const heights = new Int16Array(buf, offset, 2 * nParts);
   const coords = new Int16Array(buf, offset + 4 * nParts, 2 * nVerts);
   const u8 = new Uint8Array(buf, offset + 4 * nParts + 4 * nVerts, 2 * nParts + nRings + 3 * nTris);
   const SIZES = nParts, ROOFS = nParts + nRings, ROOF = 2 * nParts + nRings;
   const pos = new Int16Array(nVerts * 6);
   const index = new Uint16Array(nVerts * 6 + nTris * 3);
-  let v = 0, r = 0, k = 0, t = ROOF, ii = 0;
+  let v = 0, r = 0, k = 0, t = ROOF, ii = 0, bigEnd = 0, ordinaryEnd = 0;
   for (let p = 0; p < nParts; p++) {
+    // Parts come big first, then small, then landmarks (tools/common.py): note where each group ends.
+    if (p === nBig) bigEnd = ii;
+    if (p === nParts - nLandmark) ordinaryEnd = ii;
     const base = heights[2 * p], top = heights[2 * p + 1];
     let n = 0;
     for (let q = 0; q < u8[p]; q++) n += u8[SIZES + r + q];
@@ -177,6 +182,8 @@ function buildBuildings(buf, [x0, y0, nParts, nRings, nVerts, nTris, offset]) {
     for (let q = 0; q < 3 * u8[ROOFS + p]; q++) index[ii++] = v + n + u8[t++];
     v += 2 * n;
   }
+  if (nBig >= nParts) bigEnd = ii;
+  if (nLandmark === 0) ordinaryEnd = ii;
   const g = new THREE.BufferGeometry();
   g.setAttribute('position', new THREE.BufferAttribute(pos, 3).onUpload(releaseArray));
   g.setIndex(new THREE.BufferAttribute(index, 1).onUpload(releaseArray));
@@ -184,6 +191,7 @@ function buildBuildings(buf, [x0, y0, nParts, nRings, nVerts, nTris, offset]) {
   const mesh = new THREE.Mesh(g, buildingMaterial);
   mesh.position.set(x0 / 10, 0, -y0 / 10);
   mesh.scale.setScalar(0.1);
+  mesh.userData = { bigEnd, ordinaryEnd, end: ii };
   return mesh;
 }
 
@@ -927,7 +935,9 @@ function frame() {
 const blockChunks = new Map(); // "i_j" → block mesh
 const detail = new Map(); // "i_j" → { mesh, tris, used, ctrl }
 let tileIndex = null; // "i_j" → [bytes, triangles]
+let landmarksShown = false; // detailed landmarks loaded: block chunks leave their landmark parts out
 let detailCheck = { t: 0, x: NaN, y: NaN, z: NaN };
+const viewFrustum = new THREE.Frustum(), viewMatrix = new THREE.Matrix4(), chunkBox = new THREE.Box3();
 
 async function loadTileIndex(z0) {
   try {
@@ -935,26 +945,65 @@ async function loadTileIndex(z0) {
     if (index.z0 !== z0) return; // built for other building data: heights would not match
     tileIndex = index.tiles;
     requestRender();
+    if (index.landmarks) loadLandmarks();
   } catch { /* no detailed buildings; the blocks stay */ }
+}
+
+// The landmarks (cathedral, Cibona, TE-TO chimneys, …): always in full detail, one mesh per chunk.
+async function loadLandmarks() {
+  try {
+    const buf = await (await fetch(TILES_URL + 'landmarks.bin')).arrayBuffer();
+    const { header, start } = readBinary(buf, 'ZGM1');
+    for (const [x0, y0, verts, tris, bits, offset] of header.meshes) {
+      const mesh = detailMesh(buf, start + offset, { x0, y0, verts, tris, index: bits });
+      mesh.visible = true;
+      scene.add(mesh);
+    }
+    landmarksShown = true;
+    detailCheck.t = 0;
+    requestRender();
+  } catch { /* the landmarks stay blocks */ }
 }
 
 function chunkDistance(key) {
   const [i, j] = key.split('_').map(Number), p = camera.position;
   const x0 = i * CHUNK, z1 = -j * CHUNK; // chunk spans x0..x0+CHUNK east and z1-CHUNK..z1 south
   const dx = Math.max(x0 - p.x, 0, p.x - x0 - CHUNK), dz = Math.max(z1 - CHUNK - p.z, 0, p.z - z1);
-  return Math.hypot(dx, Math.max(0, p.y - 300), dz); // buildings stand below ~300 m
+  return Math.hypot(dx, Math.max(0, p.y - ground(p.x, -p.z) - 150), dz); // roofs stand below ~150 m
+}
+
+// Is the chunk (with a margin) in the camera's view? Heights cover the ground from the Sava to Sljeme.
+function chunkInView(key) {
+  const [i, j] = key.split('_').map(Number), m = 100;
+  chunkBox.min.set(i * CHUNK - m, -50, -(j + 1) * CHUNK - m);
+  chunkBox.max.set((i + 1) * CHUNK + m, 1200, -j * CHUNK + m);
+  return viewFrustum.intersectsBox(chunkBox);
+}
+
+// Far chunks keep only their big blocks and cast no shadows; landmarks are left out once shown in detail.
+function styleBlocks() {
+  for (const [key, mesh] of blockChunks) {
+    const far = chunkDistance(key) > FAR_LEVEL, d = mesh.userData;
+    mesh.geometry.setDrawRange(0, far ? d.bigEnd : landmarksShown ? d.ordinaryEnd : d.end);
+    mesh.castShadow = !far;
+  }
 }
 
 function updateDetail() {
-  if (!tileIndex) return;
   const p = camera.position, now = performance.now();
   if (now - detailCheck.t < 250 && Math.hypot(p.x - detailCheck.x, p.y - detailCheck.y, p.z - detailCheck.z) < 20) return;
   detailCheck = { t: now, x: p.x, y: p.y, z: p.z };
+  styleBlocks();
+  if (!tileIndex) return;
+  camera.updateMatrixWorld();
+  viewFrustum.setFromProjectionMatrix(viewMatrix.multiplyMatrices(camera.projectionMatrix, camera.matrixWorldInverse));
   const wanted = [];
   let loading = 0;
   for (const key of Object.keys(tileIndex)) {
     const d = chunkDistance(key), have = detail.get(key);
-    const want = d < (have ? DETAIL_FAR : DETAIL_NEAR);
+    // Loaded tiles stay up to DETAIL_FAR (off-screen ones are skipped by the renderer anyway); new ones load
+    // only in view within DETAIL_NEAR, or anywhere within DETAIL_AROUND.
+    const want = have ? d < DETAIL_FAR : d < DETAIL_AROUND || (d < DETAIL_NEAR && chunkInView(key));
     if (have) {
       if (have.ctrl && !want) { have.ctrl.abort(); detail.delete(key); continue; }
       if (have.ctrl) { loading++; continue; }
@@ -977,17 +1026,7 @@ async function loadTile(key) {
   try {
     const buf = await (await fetch(`${TILES_URL}${key}.bin`, { signal: ctrl.signal })).arrayBuffer();
     const { header, start } = readBinary(buf, 'ZGD1');
-    const pos = new Int16Array(buf, start, header.verts * 3);
-    const at = start + Math.ceil((header.verts * 6) / 4) * 4;
-    const index = header.index === 32 ? new Uint32Array(buf, at, header.tris * 3) : new Uint16Array(buf, at, header.tris * 3);
-    const g = new THREE.BufferGeometry();
-    g.setAttribute('position', new THREE.BufferAttribute(pos, 3).onUpload(releaseArray));
-    g.setIndex(new THREE.BufferAttribute(index, 1).onUpload(releaseArray));
-    g.computeBoundingSphere();
-    const mesh = new THREE.Mesh(g, buildingMaterial);
-    mesh.position.set(header.x0 / 10, 0, -header.y0 / 10);
-    mesh.scale.setScalar(0.1);
-    mesh.castShadow = mesh.receiveShadow = true;
+    const mesh = detailMesh(buf, start, header);
     mesh.visible = false; // updateDetail decides
     scene.add(mesh);
     entry.mesh = mesh;
@@ -997,6 +1036,23 @@ async function loadTile(key) {
   }
   detailCheck.t = 0; // look again right away
   requestRender();
+}
+
+// Detailed buildings of one chunk (tile or landmark file): Int16 positions in decimetres from the chunk origin, then
+// 16- or 32-bit indices; uploaded as they are and dropped from JavaScript afterwards.
+function detailMesh(buf, at, { x0, y0, verts, tris, index: bits }) {
+  const pos = new Int16Array(buf, at, verts * 3);
+  const after = at + Math.ceil((verts * 6) / 4) * 4;
+  const index = bits === 32 ? new Uint32Array(buf, after, tris * 3) : new Uint16Array(buf, after, tris * 3);
+  const g = new THREE.BufferGeometry();
+  g.setAttribute('position', new THREE.BufferAttribute(pos, 3).onUpload(releaseArray));
+  g.setIndex(new THREE.BufferAttribute(index, 1).onUpload(releaseArray));
+  g.computeBoundingSphere();
+  const mesh = new THREE.Mesh(g, buildingMaterial);
+  mesh.position.set(x0 / 10, 0, -y0 / 10);
+  mesh.scale.setScalar(0.1);
+  mesh.castShadow = mesh.receiveShadow = true;
+  return mesh;
 }
 
 // Keep the detail that is not on screen only while it fits in the triangle budget, least recently used first out.

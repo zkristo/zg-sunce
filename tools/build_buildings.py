@@ -9,9 +9,10 @@ Usage:  python3 tools/build_buildings.py
 """
 import json
 import math
+import os
 from collections import defaultdict
 
-from common import LAT0, LON0, M_PER_DEG_LAT, M_PER_DEG_LON, Terrain, feature_anchor, fetch, pack_buildings, pack_terrain, to_local, write_binary
+from common import DATA, LAT0, LON0, M_PER_DEG_LAT, M_PER_DEG_LON, Terrain, feature_anchor, fetch, pack_buildings, pack_terrain, to_local, write_binary
 from earcut import earcut
 
 CKAN = "https://data.zagreb.hr/api/3/action/package_show?id="
@@ -82,7 +83,7 @@ def area(pts):
 
 
 def parts_of(features):
-    """Yield (rings, z_min, z_max, anchor): outer ring first (CCW), then holes (CW); anchor decides the chunk."""
+    """Yield (rings, z_min, z_max, anchor, OBJECTID): outer ring first (CCW), then holes (CW); anchor decides the chunk."""
     for f in features:
         g, p = f.get("geometry"), f["properties"]
         if not g or p.get("Z_Min") is None or p.get("Z_Max") is None:
@@ -108,7 +109,7 @@ def parts_of(features):
                     if area(h) > 0:
                         h.reverse()
                     rings.append(h)
-            yield rings, p["Z_Min"], p["Z_Max"], anchor
+            yield rings, p["Z_Min"], p["Z_Max"], anchor, p.get("OBJECTID")
 
 
 def roof_triangles(rings):
@@ -241,10 +242,13 @@ def build_terrain(parts):
 
 def main():
     print("Loading districts")
+    with open(os.path.join(DATA, "landmarks.json"), encoding="utf-8") as f:
+        landmark_ids = {slug: set(ids) for slug, ids in json.load(f)["districts"].items()}
     parts = []
     for slug in DISTRICTS:
         n = len(parts)
-        parts.extend(parts_of(load_district(slug)))
+        marks = landmark_ids.get(slug, set())
+        parts.extend(p[:4] + (p[4] in marks,) for p in parts_of(load_district(slug)))
         print(f"  {slug}: {len(parts) - n} parts")
 
     print("Building terrain")
@@ -254,8 +258,8 @@ def main():
     def dm(v):
         return round(v * 10)
 
-    out, anchors, skipped = [], [], 0
-    for rings, zmin, zmax, anchor in parts:
+    out, anchors, landmarks, skipped = [], [], [], 0
+    for rings, zmin, zmax, anchor, landmark in parts:
         ground = terrain.at(*centroid(rings[0]))
         if zmax < ground + 1.5:
             skipped += 1
@@ -264,11 +268,12 @@ def main():
         base = min(zmin, ground) - 3
         out.append([dm(base - z0), dm(zmax - z0)] + [[dm(v) for p in ring for v in p] for ring in rings])
         anchors.append(anchor)
+        landmarks.append(landmark)
     print(f"  {len(out)} parts kept, {skipped} below ground skipped, {sum(len(r) // 2 for p in out for r in p[2:])} vertices")
 
     # parts: [base_dm, top_dm, outer_ring, hole, ...]; rings are flat [x, y, ...] in decimetres,
     # x = east, y = north of the origin; heights are decimetres above z0.
-    write_binary("buildings.bin", pack_buildings(out, anchors, LAT0, LON0, z0, roof_triangles))
+    write_binary("buildings.bin", pack_buildings(out, anchors, landmarks, LAT0, LON0, z0, roof_triangles))
     header = {"x0": terrain.x0, "y0": terrain.y0, "cell": terrain.cell, "nx": terrain.nx, "ny": terrain.ny, "z0": z0}
     write_binary("terrain.bin", pack_terrain(header, [dm(v - z0) for v in terrain.h]))
 

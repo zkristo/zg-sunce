@@ -3,4 +3,5 @@ numpy
 rasterio  # terrain (Copernicus DEM) in build_buildings.py
 # only for tools/build_tiles.py (detailed 3D buildings):
 pyogrio
+pyproj  # three districts are in HTRS96/TM
 fast-simplification
