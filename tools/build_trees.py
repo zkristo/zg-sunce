@@ -1,8 +1,11 @@
 #!/usr/bin/env python3
-"""Build data/trees.json from the City of Zagreb greenery cadastre. Run after build_buildings.py.
+"""Build data/trees.json from the City of Zagreb greenery cadastre and OpenStreetMap. Run after build_buildings.py.
 
 Source: public ArcGIS layer of the city's tree cadastre (trees on public land, mostly surveyed in
 2016). Height and crown width come as classes, so every tree becomes a class-sized crown.
+OpenStreetMap adds the trees the cadastre lacks (gardens, courtyards, newer plantings): single trees and tree rows
+(a tree every ROW_STEP m) further than SAME_TREE m from every cadastre tree; sized from their height and
+diameter_crown tags where present, else OSM_DEFAULT.
 Usage:  python3 tools/build_trees.py
 """
 import json
@@ -10,13 +13,16 @@ import re
 import urllib.parse
 from collections import Counter
 
-from common import Index, fetch, load_buildings, to_local, to_lonlat, write_json
+from common import Index, fetch, load_buildings, overpass, to_local, to_lonlat, write_json
 
 SERVICE = "https://services8.arcgis.com/Usi0jGQwMmBUpFjr/arcgis/rest/services/stablo_SpatialJoin/FeatureServer/0/query?"
 PAGE = 2000
 HEIGHTS = [4, 8, 13, 18, 23, 28]  # m, one per 'visina' class
 WIDTHS = [4, 8, 13, 17]  # m, one per 'pr_krosnje' class
 NEAR = 200  # m, trees are kept in grid cells at or next to displayed buildings
+SAME_TREE = 4  # m: an OSM tree this close to a cadastre tree is the same tree
+ROW_STEP = 8  # m between trees along an OSM tree row
+OSM_DEFAULT = (8, 8)  # m height and crown width of an OSM tree without size tags
 EVERGREEN = (
     "PINUS", "PICEA", "ABIES", "TAXUS", "THUJA", "CHAMAECYPARIS", "CEDRUS", "JUNIPERUS", "CUPRESS",
     "PSEUDOTSUGA", "SEQUOIA", "TSUGA", "ILEX", "BUXUS", "LAUROCERASUS", "MAGNOLIA GRANDIFLORA",
@@ -58,6 +64,52 @@ def pages(west, south, east, north):
         offset += PAGE
 
 
+def nearest_class(value, sizes):
+    return min(range(len(sizes)), key=lambda k: abs(sizes[k] - value))
+
+
+def metres(text):
+    """'12', '12 m', '12.5' -> float; anything else -> None."""
+    m = re.match(r"\s*(\d+(?:[.,]\d+)?)\s*(m)?\s*$", text or "")
+    return float(m.group(1).replace(",", ".")) if m else None
+
+
+def osm_trees(west, south, east, north):
+    """[(x, y, tags)] of OSM single trees and of trees spaced along tree rows."""
+    query = f"""[out:json][timeout:180];
+(
+  node["natural"="tree"]({south:.5f},{west:.5f},{north:.5f},{east:.5f});
+  way["natural"="tree_row"]({south:.5f},{west:.5f},{north:.5f},{east:.5f});
+);
+out geom tags;"""
+    with open(overpass(query, "trees.overpass.json"), encoding="utf-8") as f:
+        elements = json.load(f)["elements"]
+    out = []
+    for el in elements:
+        tags = el.get("tags", {})
+        if el["type"] == "node":
+            out.append((*to_local(el["lon"], el["lat"]), tags))
+            continue
+        line = [to_local(p["lon"], p["lat"]) for p in el.get("geometry", [])]
+        for (ax, ay), (bx, by) in zip(line, line[1:]):
+            k = max(1, round(((bx - ax) ** 2 + (by - ay) ** 2) ** 0.5 / ROW_STEP))
+            out += [(ax + (bx - ax) * i / k, ay + (by - ay) * i / k, tags) for i in range(k)]
+        if line:
+            out.append((*line[-1], tags))
+    return out
+
+
+def osm_code(tags):
+    species = " ".join(tags.get(k, "") for k in ("species", "genus", "taxon")).upper()
+    evergreen = tags.get("leaf_type") == "needleleaved" or tags.get("leaf_cycle") == "evergreen" or any(
+        k in species for k in EVERGREEN)
+    hc = nearest_class(metres(tags.get("height")) or OSM_DEFAULT[0], HEIGHTS)
+    wc = nearest_class(metres(tags.get("diameter_crown")) or OSM_DEFAULT[1], WIDTHS)
+    while wc and WIDTHS[wc] > 1.2 * HEIGHTS[hc]:
+        wc -= 1
+    return hc | wc << 3 | evergreen << 5, evergreen
+
+
 def main():
     parts, n_core = load_buildings()
     index = Index(parts)
@@ -90,7 +142,31 @@ def main():
         stats[f"height {HEIGHTS[hc]} m"] += 1
         if not evergreen:
             deciduous[species] += 1
-    print(f"  {len(out) // 3} trees kept;", ", ".join(f"{k}: {v}" for k, v in sorted(stats.items())))
+    cadastre = len(out) // 3
+    near = {}
+    for k in range(0, len(out), 3):
+        near.setdefault((out[k] // (SAME_TREE * 10), out[k + 1] // (SAME_TREE * 10)), []).append((out[k] / 10, out[k + 1] / 10))
+    osm = Counter()
+    for x, y, tags in osm_trees(w, s, e, n):
+        i, j = int(x // SAME_TREE), int(y // SAME_TREE)
+        if any((x - a) ** 2 + (y - b) ** 2 <= SAME_TREE ** 2
+               for di in (-1, 0, 1) for dj in (-1, 0, 1) for a, b in near.get((i + di, j + dj), ())):
+            osm["same as a cadastre tree"] += 1
+            continue
+        if (int(x // NEAR), int(y // NEAR)) not in cells:
+            osm["outside the area"] += 1
+            continue
+        if index.covers(x, y):
+            osm["inside a building"] += 1
+            continue
+        code, evergreen = osm_code(tags)
+        out += [round(x * 10), round(y * 10), code]
+        osm["added"] += 1
+        osm["sized from tags"] += "height" in tags or "diameter_crown" in tags
+        osm["evergreen"] += evergreen
+    print(f"  {cadastre} cadastre trees kept;", ", ".join(f"{k}: {v}" for k, v in sorted(stats.items())))
+    print("  OpenStreetMap trees:", ", ".join(f"{k}: {v}" for k, v in sorted(osm.items())))
+    print(f"  {len(out) // 3} trees in all")
     print("  most common species counted as deciduous:", ", ".join(k for k, _ in deciduous.most_common(40)))
 
     # t: flat [x, y, code, ...] in decimetres from the origin (x = east, y = north);
