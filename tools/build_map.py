@@ -102,17 +102,24 @@ def distance_field(shapes, box):
     return out
 
 
+# Everything the standard OpenStreetMap map draws in a shade of green.
+GREEN_TAGS = {
+    "leisure": ("park", "garden", "pitch", "golf_course", "playground", "dog_park", "common"),
+    "landuse": ("grass", "recreation_ground", "meadow", "village_green", "cemetery", "forest", "farmland", "orchard",
+                "vineyard", "plant_nursery", "allotments", "greenfield"),
+    "natural": ("wood", "scrub", "grassland", "heath", "wetland"),
+}
+
+
 def area_kind(tags):
     """Kind of a closed way or multipolygon, or None if it is not an area drawn on the map."""
     if tags.get("natural") == "water":
         return AREA_WATER
     if tags.get("highway") in ("pedestrian", "footway") and tags.get("area") == "yes":
         return AREA_PEDESTRIAN
-    if tags.get("landuse") == "forest" or tags.get("natural") == "wood":
-        return AREA_WOOD
-    if tags.get("leisure") in ("park", "garden", "pitch") or tags.get("landuse") in (
-        "grass", "recreation_ground", "meadow", "village_green", "cemetery"):
-        return AREA_GREEN
+    if (tags.get("leisure") in GREEN_TAGS["leisure"] or tags.get("landuse") in GREEN_TAGS["landuse"]
+            or tags.get("natural") in GREEN_TAGS["natural"]):
+        return AREA_GREEN  # one colour for all green, woods included
     return None
 
 
@@ -263,6 +270,10 @@ def main():
 out geom;"""
     with open(overpass(query, "map.overpass.json", timeout=400), encoding="utf-8") as f:
         elements = json.load(f)["elements"]
+    green = "".join(f'  {t}["{k}"~"^({"|".join(v)})$"]({bb});\n' for k, v in GREEN_TAGS.items() for t in ("way", "relation"))
+    with open(overpass(f"[out:json][timeout:300];\n(\n{green});\nout geom;", "green.overpass.json", timeout=400), encoding="utf-8") as f:
+        seen = {(el["type"], el["id"]) for el in elements}
+        elements += [el for el in json.load(f)["elements"] if (el["type"], el["id"]) not in seen]
 
     lines, areas, land, stats = [], [], [], Counter()
     for el in elements:

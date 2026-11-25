@@ -40,11 +40,16 @@ MIN_HEIGHT = 2.0  # m
 MIN_AREA = 4.0  # m2
 TERRAIN_CELL = 40  # m
 TERRAIN_RADIUS = 120  # m
-# Away from buildings the ground comes from the Copernicus DEM GLO-30 (30 m, free; © DLR e.V. 2010-2014 and
-# © Airbus Defence and Space GmbH 2014-2018 provided under COPERNICUS by the European Union and ESA).
+# Away from buildings the ground comes from the State Geodetic Administration's height model (DGU, INSPIRE
+# elevation download service, 20 m, bare ground, EPSG:3045; open licence). The few cells past its edge take the
+# Copernicus DEM GLO-30 (30 m surface; © DLR e.V. 2010-2014 and © Airbus Defence and Space GmbH 2014-2018 provided
+# under COPERNICUS by the European Union and ESA).
+DGU_URL = "https://geoportal.dgu.hr/services/atom/RH_ELEV_{}.tif"
+DGU_TILES = [107, 106, 94, 93]  # the 41 km tiles around Zagreb
 DEM_URL = "https://copernicus-dem-30m.s3.amazonaws.com/{0}/{0}.tif"
 DEM_TILES = ["Copernicus_DSM_COG_10_N45_00_E015_00_DEM", "Copernicus_DSM_COG_10_N45_00_E016_00_DEM"]
 DEM_NEAR, DEM_FAR = 300, 600  # m from the nearest buildings: blend from building-based ground to the DEM
+Z0 = 94  # m: datum of all stored heights (Int16 decimetres may go below it); the detail tiles share it
 PIT = 5  # m: building-based ground this far below the lowest DEM point around is a basement, not the ground
 
 
@@ -145,27 +150,62 @@ def _window(a, op):
     return out
 
 
+def _bilinear(r, a, col, row, out, nodata=None):
+    """Fill the NaN cells of out that fall inside raster r (array a) at pixel coordinates col, row."""
+    import numpy as np
+
+    col, row = col - 0.5, row - 0.5  # relative to pixel centres
+    inside = (col >= -0.5) & (col <= r.width - 0.5) & (row >= -0.5) & (row <= r.height - 0.5) & np.isnan(out)
+    c, rr = np.clip(col[inside], 0, r.width - 1), np.clip(row[inside], 0, r.height - 1)
+    c0 = np.minimum(np.floor(c).astype(int), r.width - 2)
+    r0 = np.minimum(np.floor(rr).astype(int), r.height - 2)
+    fc, fr = c - c0, rr - r0
+    corners = (a[r0, c0], a[r0, c0 + 1], a[r0 + 1, c0], a[r0 + 1, c0 + 1])
+    v = corners[0] * (1 - fc) * (1 - fr) + corners[1] * fc * (1 - fr) + corners[2] * (1 - fc) * fr + corners[3] * fc * fr
+    if nodata is not None:
+        v[np.any([k == nodata for k in corners], axis=0)] = np.nan
+    out[inside] = v
+
+
+def _grid_lonlat(x0, y0, nx, ny):
+    import numpy as np
+
+    lon = LON0 + (x0 + np.arange(nx) * TERRAIN_CELL) / M_PER_DEG_LON
+    lat = LAT0 + (y0 + np.arange(ny) * TERRAIN_CELL) / M_PER_DEG_LAT
+    return np.meshgrid(lon, lat)
+
+
+def ground_grid(x0, y0, nx, ny):
+    """DGU bare-ground heights at the terrain grid points (bilinear); Copernicus where DGU has no data."""
+    import numpy as np
+    import rasterio
+    from pyproj import Transformer
+
+    lo, la = _grid_lonlat(x0, y0, nx, ny)
+    e, n = Transformer.from_crs(4326, 3045, always_xy=True).transform(lo, la)
+    out = np.full((ny, nx), np.nan)
+    for tile in DGU_TILES:
+        with rasterio.open(fetch(DGU_URL.format(tile), f"dgu_elev_{tile}.tif", timeout=600)) as r:
+            col, row = ~r.transform * (e, n)
+            _bilinear(r, r.read(1).astype(np.float64), col, row, out, r.nodata)
+    missing = np.isnan(out)
+    if missing.any():
+        out[missing] = dem_grid(x0, y0, nx, ny)[missing]
+    print(f"  ground heights: DGU, {missing.sum()} cells past its edge from Copernicus")
+    return out
+
+
 def dem_grid(x0, y0, nx, ny):
     """Copernicus GLO-30 surface heights at the terrain grid points (bilinear)."""
     import numpy as np
     import rasterio
 
-    lon = LON0 + (x0 + np.arange(nx) * TERRAIN_CELL) / M_PER_DEG_LON
-    lat = LAT0 + (y0 + np.arange(ny) * TERRAIN_CELL) / M_PER_DEG_LAT
-    lo, la = np.meshgrid(lon, lat)
+    lo, la = _grid_lonlat(x0, y0, nx, ny)
     out = np.full((ny, nx), np.nan)
     for tile in DEM_TILES:
         with rasterio.open(fetch(DEM_URL.format(tile), tile + ".tif", timeout=600)) as r:
-            a = r.read(1).astype(np.float64)
             col, row = ~r.transform * (lo, la)
-            col, row = col - 0.5, row - 0.5  # relative to pixel centres
-            inside = (col >= -0.5) & (col <= r.width - 0.5) & (row >= -0.5) & (row <= r.height - 0.5) & np.isnan(out)
-            c, rr = np.clip(col[inside], 0, r.width - 1), np.clip(row[inside], 0, r.height - 1)
-            c0 = np.minimum(np.floor(c).astype(int), r.width - 2)
-            r0 = np.minimum(np.floor(rr).astype(int), r.height - 2)
-            fc, fr = c - c0, rr - r0
-            out[inside] = (a[r0, c0] * (1 - fc) * (1 - fr) + a[r0, c0 + 1] * fc * (1 - fr)
-                           + a[r0 + 1, c0] * (1 - fc) * fr + a[r0 + 1, c0 + 1] * fc * fr)
+            _bilinear(r, r.read(1).astype(np.float64), col, row, out)
     if np.isnan(out).any():
         raise ValueError("terrain grid reaches beyond the downloaded DEM tiles")
     return out
@@ -173,7 +213,7 @@ def dem_grid(x0, y0, nx, ny):
 
 def build_terrain(parts):
     """Ground elevation grid. Near buildings: a low percentile of nearby Z_Min values (robust against roof-level
-    parts), with basement pits fixed from the DEM; far from buildings: the Copernicus DEM, blended in between."""
+    parts), with basement pits fixed from the DGU ground; far from buildings: the DGU ground, blended in between."""
     xs = [p for rings, _, _ in parts for p in rings[0]]
     x0 = min(p[0] for p in xs) - 2 * TERRAIN_CELL
     y0 = min(p[1] for p in xs) - 2 * TERRAIN_CELL
@@ -204,9 +244,8 @@ def build_terrain(parts):
 
     B = np.array([np.nan if v is None else v for v in h]).reshape(ny, nx)
     built = ~np.isnan(B)
-    surface = dem_grid(x0, y0, nx, ny)  # includes roofs and treetops
-    low = _window(surface, np.minimum)  # lowest point within ±1 cell: the streets and yards in between
-    ground = _window(low, np.maximum)  # "opening": buildings and trees narrower than ~120 m gone, slopes kept
+    ground = ground_grid(x0, y0, nx, ny)  # bare ground: no roofs or treetops to filter out
+    low = _window(ground, np.minimum)  # lowest point within ±1 cell
     # Z_Min of deep underground parts drags the building-based ground into pits; the DEM knows better there.
     pits = built & (B < low - PIT)
     B[pits] = low[pits]
@@ -227,8 +266,8 @@ def build_terrain(parts):
         smooth = _window(B, None)
         B = np.where(built & (step >= 2), B, smooth)
 
-    # Far from buildings (Medvednica, fields, the Sava outside the city) the DEM takes over; the median difference
-    # where both exist (vertical datum, leftovers of buildings in the 30 m pixels) is taken off first.
+    # Far from buildings (Medvednica, fields, the Sava outside the city) the DGU ground takes over; the median
+    # difference where both exist is taken off first.
     offset = np.median((B - ground)[built])
     dem = ground + offset
     for _ in range(2):
@@ -253,7 +292,7 @@ def main():
 
     print("Building terrain")
     terrain = build_terrain([p[:3] for p in parts])
-    z0 = math.floor(min(terrain.h))
+    z0 = Z0
 
     def dm(v):
         return round(v * 10)
