@@ -84,10 +84,10 @@ html, body {
   pointer-events: none;
 }
 
-/* Tool buttons: bottom left, above the time bar and the bottom sheet */
+/* Tool buttons: bottom right, above the time bar and the bottom sheet */
 #tools {
   position: fixed;
-  left: var(--gap);
+  right: var(--gap);
   bottom: calc(2 * var(--gap) + var(--safe-b) + var(--bar) + var(--sheet));
   display: flex;
   flex-direction: column;
@@ -179,6 +179,13 @@ html, body {
 .daybar { position: relative; height: 14px; margin: 10px 0 2px; border-radius: 7px; background: var(--shade); }
 .daybar i { position: absolute; top: -3px; width: 2px; height: 20px; background: var(--text); border-radius: 1px; }
 .links { display: flex; gap: 14px; margin-top: 10px; font-size: 13px; }
+/* Café card: the full name, the distance below it, the day bar with the sun's start and end times under it */
+#panel h2.name { padding-right: 34px; }
+.dist { font-size: 13px; color: var(--muted); font-variant-numeric: tabular-nums; }
+.suntimes { position: relative; height: 16px; margin-top: 2px; font-size: 11px; color: var(--muted); font-variant-numeric: tabular-nums; }
+.suntimes span { position: absolute; top: 0; width: 12%; text-align: center; white-space: nowrap; }
+.suntimes span.first { text-align: left; }
+.suntimes span.last { text-align: right; }
 
 .cafelist { list-style: none; margin: 8px 0 0; padding: 0; }
 .cafelist li { display: flex; align-items: center; gap: 10px; padding: 9px 2px; border-top: 1px solid #e3e7ec; cursor: pointer; }
@@ -200,7 +207,8 @@ html, body {
   #top h1 { font-size: 18px; }
   #banner { left: 50%; right: auto; width: max-content; max-width: 560px; transform: translateX(-50%); }
   #timebar { left: 50%; right: auto; width: 620px; transform: translateX(-50%); }
-  #panel { left: auto; right: var(--gap); top: 80px; bottom: auto; width: 340px; max-height: calc(100vh - 100px - var(--bar)); }
+  /* The card stays clear of the buttons in the bottom right corner. */
+  #panel { left: auto; right: var(--gap); top: 80px; bottom: auto; width: 340px; max-height: calc(100vh - 80px - 3 * var(--gap) - var(--safe-b) - 200px); }
   /* The time bar is centred, so the buttons fit beside it. */
   #tools { bottom: calc(var(--gap) + var(--safe-b)); }
 }

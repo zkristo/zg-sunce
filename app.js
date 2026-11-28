@@ -14,7 +14,6 @@ const EYE = 1.2; // m above ground where a terrace is tested for sun
 const SHADE = 0, TREE = 1, SUN = 2; // state of a terrace
 const STATE_NAME = ['shade', 'tree', 'sun'];
 const TREE_REACH = 250; // m, how far towards the sun a tree can still shade a terrace
-const TYPE_LABEL = { cafe: 'Kafić', bar: 'Bar', pub: 'Pub' };
 
 const $ = (id) => document.getElementById(id);
 const fmtTime = new Intl.DateTimeFormat('hr-HR', { hour: '2-digit', minute: '2-digit', timeZone: 'Europe/Zagreb' });
@@ -281,18 +280,42 @@ function cafePanel(c) {
   const pos = (state.time - d.start) / (n * STEP);
   const bar = el('div', { class: 'daybar', style: `background-image:linear-gradient(90deg,${stops.join(',')})` });
   if (pos >= 0 && pos <= 1) bar.append(el('i', { style: `left:${pos * 100}%` }));
-  const seating = c.outdoor ? ' · terasa potvrđena u OSM-u' : '';
   return [
-    el('h2', {}, c.name || 'Kafić bez imena'),
-    el('div', { class: 'sub' }, (TYPE_LABEL[c.type] || 'Kafić') + seating + ' · ' + distanceLabel(c)),
-    el('div', { class: 'status' }, el('span', { class: 'dot ' + STATE_NAME[c.state] }), ['U sjeni · ', 'Pod krošnjom · ', 'Na suncu '][c.state] + forecast(c)),
+    el('h2', { class: 'name' }, c.name || 'Kafić bez imena'),
+    el('div', { class: 'dist' }, distanceLabel(c)),
     bar,
-    el('div', { class: 'ticks' }, el('span', {}, hhmm(d.sunrise)), el('span', {}, d.tomorrow ? 'sunce sutra' : 'sunce danas'), el('span', {}, hhmm(d.sunset))),
-    el('div', { class: 'links' },
-      el('a', { href: `https://www.google.com/maps/search/?api=1&query=${c.lat},${c.lon}`, target: '_blank', rel: 'noopener' }, 'Google karte'),
-      // Cafés from Overture Maps (id "o…") have no OpenStreetMap page.
-      c.id[0] === 'o' ? '' : el('a', { href: `https://www.openstreetmap.org/${{ n: 'node', w: 'way', r: 'relation' }[c.id[0]]}/${c.id.slice(1)}`, target: '_blank', rel: 'noopener' }, 'OpenStreetMap')),
+    sunTimes(s, d),
+    el('div', { class: 'links' }, el('a', { href: googleMapsUrl(c), target: '_blank', rel: 'noopener' }, 'Google karte')),
   ];
+}
+
+// Times under the day bar: where each stretch of sun starts and ends, then sunrise and sunset at the ends. A time
+// too close to one already placed is left out, so they never overlap (a short stretch keeps only its start).
+const LABEL_WIDTH = 0.12; // share of the bar width one time takes, with a little space
+function sunTimes(s, d) {
+  const n = s.length, want = [];
+  for (let i = 0, j; i < n; i = j) {
+    for (j = i; j < n && s[j] === s[i]; j++);
+    if (s[i] === SUN) want.push([i / n, d.start + i * STEP], [j / n, d.start + j * STEP]);
+  }
+  want.push([0, d.sunrise], [1, d.sunset]);
+  // A time is centred under its spot, except near the ends, where it lines up with the bar's edge.
+  const span = (f) => { const a = Math.min(Math.max(f - LABEL_WIDTH / 2, 0), 1 - LABEL_WIDTH); return [a, a + LABEL_WIDTH]; };
+  const placed = [];
+  for (const w of want) {
+    const [a, b] = span(w[0]);
+    if (placed.every((q) => { const [c, e] = span(q[0]); return b <= c || a >= e; })) placed.push(w);
+  }
+  return el('div', { class: 'suntimes' }, ...placed.map(([f, t]) =>
+    el('span', { class: f < LABEL_WIDTH / 2 ? 'first' : f > 1 - LABEL_WIDTH / 2 ? 'last' : '', style: `left:${span(f)[0] * 100}%` }, hhmm(t))));
+}
+
+// Google Maps searched for the café's name at its spot, which opens the café's own page (busyness, reviews) rather
+// than a bare pin; cafés without a name fall back to the coordinates.
+function googleMapsUrl(c) {
+  return c.name
+    ? `https://www.google.com/maps/search/${encodeURIComponent(c.name)}/@${c.lat},${c.lon},19z`
+    : `https://www.google.com/maps/search/?api=1&query=${c.lat},${c.lon}`;
 }
 
 function listPanel() {
@@ -435,20 +458,28 @@ function showUser(x, y) {
   return inside;
 }
 
-function locate() {
+// Position fix as local metres {x, y}, or null when unavailable (denied, no answer within 10 s, no GPS).
+function getFix() {
+  return new Promise((resolve) => {
+    if (!navigator.geolocation) return resolve(null);
+    navigator.geolocation.getCurrentPosition((p) => {
+      const lat0 = map ? map.geo.lat0 : 45.8131, lon0 = map ? map.geo.lon0 : 15.9772, phi = lat0 * DEG;
+      resolve({
+        x: (p.coords.longitude - lon0) * (111412.84 * Math.cos(phi) - 93.5 * Math.cos(3 * phi)),
+        y: (p.coords.latitude - lat0) * (111132.92 - 559.82 * Math.cos(2 * phi) + 1.175 * Math.cos(4 * phi)),
+      });
+    }, () => resolve(null), { enableHighAccuracy: true, timeout: 10000, maximumAge: 60000 });
+  });
+}
+
+async function locate() {
   if (!navigator.geolocation) return toast('Preglednik ne podržava lokaciju.');
   $('btn-locate').classList.add('active');
   if (state.user) showUser(state.user.x, state.user.y); // start sliding at once, the fresh fix follows
-  navigator.geolocation.getCurrentPosition((p) => {
-    $('btn-locate').classList.remove('active');
-    const lat0 = map.geo.lat0 * DEG;
-    const x = (p.coords.longitude - map.geo.lon0) * (111412.84 * Math.cos(lat0) - 93.5 * Math.cos(3 * lat0));
-    const y = (p.coords.latitude - map.geo.lat0) * (111132.92 - 559.82 * Math.cos(2 * lat0) + 1.175 * Math.cos(4 * lat0));
-    if (!showUser(x, y)) toast('Izvan si prikazanog područja – udaljenosti se ipak računaju od tebe.');
-  }, () => {
-    $('btn-locate').classList.remove('active');
-    toast('Lokacija nije dostupna.');
-  }, { enableHighAccuracy: true, timeout: 10000 });
+  const fix = await getFix();
+  $('btn-locate').classList.remove('active');
+  if (!fix) toast('Lokacija nije dostupna.');
+  else if (!showUser(fix.x, fix.y)) toast('Izvan si prikazanog područja – udaljenosti se ipak računaju od tebe.');
 }
 
 // Live mode follows the clock: recompute once the minute changes.
@@ -474,10 +505,15 @@ async function updateCloud() {
 // ---------- start ----------
 
 async function main() {
+  // Start where the user is: ask for the position right away (the first visit shows the browser's prompt). With
+  // permission already given the fix comes quickly, so the map waits a moment for it and opens right there.
+  const firstFix = getFix();
+  const granted = await navigator.permissions?.query({ name: 'geolocation' }).then((r) => r.state === 'granted', () => false);
+  const early = granted ? await Promise.race([firstFix, new Promise((r) => setTimeout(r, 2000, null))]) : null;
   const { createMap } = await import(MAP_URL);
   const tiles = params.get('tiles');
   [map, cafes] = await Promise.all([
-    createMap({ canvas, ...(tiles && { tiles }) }),
+    createMap({ canvas, ...(tiles && { tiles }), ...(early && Math.hypot(early.x, early.y) < 12000 && { view: { x: early.x, y: early.y, dist: 700 } }) }),
     fetch('data/cafes.json').then((r) => { if (!r.ok) throw new Error('cafes'); return r.json(); }),
   ]);
   map.scene.add(markers, ringSprite, userSprite);
@@ -500,6 +536,8 @@ async function main() {
   styleMarkers();
   tick(true);
   $('loading').hidden = true;
+  // Outside the map (or no answer) the view stays on the centre, without a message.
+  firstFix.then((fix) => { if (fix && !state.user) showUser(fix.x, fix.y); });
 
   setInterval(tick, 10000);
   updateCloud();
